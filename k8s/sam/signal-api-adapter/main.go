@@ -178,25 +178,40 @@ func fetchAttachmentData(ctx context.Context, account, attachmentID, recipient s
 func enrichAttachmentsInDataMessage(ctx context.Context, account, source string, dataMsg map[string]any) {
 	attachments, _ := dataMsg["attachments"].([]any)
 	if len(attachments) == 0 {
+		log.Printf("enrichAttachments: no attachments in dataMessage (keys=%v)", mapKeys(dataMsg))
 		return
 	}
+	log.Printf("enrichAttachments: found %d attachment(s)", len(attachments))
 	for i, att := range attachments {
 		attMap, ok := att.(map[string]any)
 		if !ok {
+			log.Printf("enrichAttachments: attachment[%d] not a map, type=%T", i, att)
 			continue
 		}
 		id, _ := attMap["id"].(string)
+		contentType, _ := attMap["contentType"].(string)
 		if id == "" {
+			log.Printf("enrichAttachments: attachment[%d] has no id (keys=%v)", i, mapKeys(attMap))
 			continue
 		}
+		log.Printf("enrichAttachments: fetching attachment[%d] id=%s contentType=%s", i, id, contentType)
 		data, err := fetchAttachmentData(ctx, account, id, source)
 		if err != nil {
 			log.Printf("enrichAttachments: id=%s err=%v", id, err)
 			continue
 		}
+		log.Printf("enrichAttachments: fetched attachment[%d] id=%s len=%d", i, id, len(data))
 		attMap["data"] = data
 		attachments[i] = attMap
 	}
+}
+
+func mapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // enrichAttachments parses a message envelope, fetches attachment data from
@@ -409,6 +424,9 @@ func streamEventsByPolling(ctx context.Context, account string, w http.ResponseW
   ticker := time.NewTicker(15 * time.Second)
   defer ticker.Stop()
 
+  const maxConsecutiveFailures = 5
+  consecutiveFailures := 0
+
   for {
     select {
     case <-ctx.Done():
@@ -424,16 +442,25 @@ func streamEventsByPolling(ctx context.Context, account string, w http.ResponseW
     resp, body, err := bridgeRequest(reqCtx, http.MethodGet, path, nil, map[string]string{"Accept": "application/json"})
     cancel()
     if err != nil {
-      log.Printf("events polling request error account=%s err=%v", account, err)
+      consecutiveFailures++
+      log.Printf("events polling request error account=%s err=%v (consecutive=%d)", account, err, consecutiveFailures)
+      if consecutiveFailures >= maxConsecutiveFailures {
+        return fmt.Errorf("polling failed %d consecutive times: %w", consecutiveFailures, err)
+      }
       time.Sleep(2 * time.Second)
       continue
     }
     if resp.StatusCode/100 != 2 {
-      log.Printf("events polling bad status account=%s status=%d body=%s", account, resp.StatusCode, strings.TrimSpace(string(body)))
+      consecutiveFailures++
+      log.Printf("events polling bad status account=%s status=%d body=%s (consecutive=%d)", account, resp.StatusCode, strings.TrimSpace(string(body)), consecutiveFailures)
+      if consecutiveFailures >= maxConsecutiveFailures {
+        return fmt.Errorf("polling got status %d for %d consecutive requests", resp.StatusCode, consecutiveFailures)
+      }
       time.Sleep(2 * time.Second)
       continue
     }
 
+    consecutiveFailures = 0
     trimmed := bytes.TrimSpace(body)
     if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("[]")) {
       continue
