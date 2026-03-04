@@ -533,6 +533,16 @@ pub(crate) async fn deliver_announcement(
                 anyhow::bail!("matrix delivery channel requires `channel-matrix` feature");
             }
         }
+        "signal" => {
+            if let Some(live_channel) = crate::channels::get_live_channel("signal") {
+                live_channel.send(&SendMessage::new(output, target)).await?;
+            } else {
+                anyhow::bail!(
+                    "signal delivery requires an active signal channel session; \
+                     start daemon/channels with signal enabled"
+                );
+            }
+        }
         other => anyhow::bail!("unsupported delivery channel: {other}"),
     }
 
