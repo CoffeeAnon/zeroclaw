@@ -1,0 +1,227 @@
+# trunk-ignore(checkov/CKV_K8S_8): zeroclaw gateway does not document a dedicated liveness endpoint
+# trunk-ignore(checkov/CKV_K8S_9): zeroclaw gateway does not document a dedicated readiness endpoint
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: zeroclaw
+  namespace: zeroclaw-test
+spec:
+  replicas: 1
+  podTemplate:
+    metadata:
+      labels:
+        app: zeroclaw
+    spec:
+      serviceAccountName: zeroclaw-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: false
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: regcred
+      initContainers:
+        - name: init-zeroclaw-config
+          image: debian:bookworm-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /data/.zeroclaw /data/.zeroclaw/workspace
+              if [ ! -f /data/.zeroclaw/config.toml ]; then
+                echo "Seeding zeroclaw config from ConfigMap template"
+                cp /etc/zeroclaw-template/config.toml /data/.zeroclaw/config.toml
+                chmod 600 /data/.zeroclaw/config.toml
+              else
+                echo "Config already exists, skipping seed"
+              fi
+              # Seed the encryption key used to decrypt enc2: values in config.
+              if [ ! -f /data/.zeroclaw/.secret_key ]; then
+                echo "Seeding secret key from ConfigMap"
+                cp /etc/zeroclaw-template/secret_key /data/.zeroclaw/.secret_key
+                chmod 600 /data/.zeroclaw/.secret_key
+              fi
+              # Seed identity files into workspace if missing.
+              for f in IDENTITY.md SOUL.md USER.md AGENTS.md TOOLS.md MEMORY.md BOOTSTRAP.md HEARTBEAT.md; do
+                if [ ! -f "/data/.zeroclaw/workspace/$f" ] && [ -f "/etc/zeroclaw-template/identity/$f" ]; then
+                  echo "Seeding $f"
+                  cp "/etc/zeroclaw-template/identity/$f" "/data/.zeroclaw/workspace/$f"
+                fi
+              done
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: zeroclaw-data
+              mountPath: /data
+            - name: zeroclaw-config-template
+              mountPath: /etc/zeroclaw-template/config.toml
+              subPath: config.toml
+              readOnly: true
+            - name: zeroclaw-config-template
+              mountPath: /etc/zeroclaw-template/secret_key
+              subPath: secret_key
+              readOnly: true
+            - name: zeroclaw-identity
+              mountPath: /etc/zeroclaw-template/identity
+              readOnly: true
+      containers:
+        - name: zeroclaw
+          image: citizendaniel/zeroclaw-sam:v1.1.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /data/.zeroclaw /data/workspace /tmp/agent-browser
+              cd /data/workspace
+              # Pre-start the agent-browser daemon so it's warm when zeroclaw
+              # needs it. Redirect stdin from /dev/null so process.stdin.resume()
+              # inside the daemon doesn't trigger SIGTTIN when run in background.
+              node /opt/sam-tools/npm-global/lib/node_modules/agent-browser/dist/daemon.js </dev/null &
+              # Wait up to 180s for the socket to appear before starting zeroclaw.
+              echo "Waiting for agent-browser daemon socket..."
+              for _i in $(seq 1 180); do
+                [ -S /tmp/agent-browser/default.sock ] && echo "Daemon ready." && break
+                sleep 1
+              done
+              [ -S /tmp/agent-browser/default.sock ] || echo "Warning: daemon socket not ready, starting zeroclaw anyway"
+              exec zeroclaw daemon
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: HOME
+              value: /data
+            - name: AGENT_BROWSER_SOCKET_DIR
+              value: /tmp/agent-browser
+            - name: AGENT_BROWSER_ARGS
+              value: "--no-sandbox,--disable-setuid-sandbox,--disable-dev-shm-usage"
+            - name: PLAYWRIGHT_BROWSERS_PATH
+              value: /opt/sam-tools/home/.cache/ms-playwright
+            - name: SERENA_SESSION_FILE
+              value: /data/.zeroclaw/serena-session-id
+            - name: SERENA_DEFAULT_PROJECT
+              value: sam
+            - name: OPENROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: zeroclaw-secrets
+                  key: openrouter-api-key
+                  optional: true
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: zeroclaw-secrets
+                  key: anthropic-api-key
+                  optional: true
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: zeroclaw-data
+              mountPath: /data
+        - name: serena
+          image: citizendaniel/zeroclaw-sam:v1.1.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /data/workspace
+              cd /data/workspace
+              exec /opt/sam-tools/home/.local/bin/serena start-mcp-server \
+                --transport streamable-http \
+                --port 9121 \
+                --enable-web-dashboard false \
+                --enable-gui-log-window false \
+                --project sam
+          ports:
+            - name: serena-mcp
+              containerPort: 9121
+              protocol: TCP
+          env:
+            - name: HOME
+              value: /opt/sam-tools/home
+            - name: UV_TOOL_DIR
+              value: /opt/sam-tools/home/.local/share/uv/tools
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: zeroclaw-data
+              mountPath: /data
+        - name: signal-api-adapter
+          image: citizendaniel/signal-api-adapter:v1.2.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: signal-adapt
+              containerPort: 8686
+              protocol: TCP
+          env:
+            - name: BRIDGE_BASE_URL
+              value: http://signal-cli-daemon.zeroclaw-test.svc.cluster.local:8686
+            - name: LISTEN_ADDR
+              value: :8686
+            - name: POLL_TIMEOUT_SECONDS
+              value: "20"
+            - name: SIGNAL_ACCOUNT
+              value: "+15873986009"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: zeroclaw-config-template
+          configMap:
+            name: zeroclaw-config
+        - name: zeroclaw-identity
+          configMap:
+            name: zeroclaw-identity
+  volumeClaimTemplates:
+    - metadata:
+        name: zeroclaw-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: rook-ceph-block
+        resources:
+          requests:
+            storage: 10Gi
