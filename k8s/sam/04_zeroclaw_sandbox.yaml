@@ -32,18 +32,14 @@ spec:
             - -ec
             - |
               mkdir -p /data/.zeroclaw /data/.zeroclaw/workspace
+              # Seed config.toml from ConfigMap template (one-time).
+              # Secrets are injected via env vars, not in the config file.
               if [ ! -f /data/.zeroclaw/config.toml ]; then
                 echo "Seeding zeroclaw config from ConfigMap template"
                 cp /etc/zeroclaw-template/config.toml /data/.zeroclaw/config.toml
                 chmod 600 /data/.zeroclaw/config.toml
               else
                 echo "Config already exists, skipping seed"
-              fi
-              # Seed the encryption key used to decrypt enc2: values in config.
-              if [ ! -f /data/.zeroclaw/.secret_key ]; then
-                echo "Seeding secret key from ConfigMap"
-                cp /etc/zeroclaw-template/secret_key /data/.zeroclaw/.secret_key
-                chmod 600 /data/.zeroclaw/.secret_key
               fi
               # Seed identity files into workspace if missing.
               for f in IDENTITY.md SOUL.md USER.md AGENTS.md TOOLS.md MEMORY.md BOOTSTRAP.md HEARTBEAT.md; do
@@ -70,16 +66,12 @@ spec:
               mountPath: /etc/zeroclaw-template/config.toml
               subPath: config.toml
               readOnly: true
-            - name: zeroclaw-config-template
-              mountPath: /etc/zeroclaw-template/secret_key
-              subPath: secret_key
-              readOnly: true
             - name: zeroclaw-identity
               mountPath: /etc/zeroclaw-template/identity
               readOnly: true
       containers:
         - name: zeroclaw
-          image: citizendaniel/zeroclaw-sam:v1.1.1
+          image: citizendaniel/zeroclaw-sam:v1.2.0
           imagePullPolicy: IfNotPresent
           command:
             - sh
@@ -106,6 +98,16 @@ spec:
           env:
             - name: HOME
               value: /data
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: zeroclaw-config-secrets
+                  key: api-key
+            - name: ZEROCLAW_GATEWAY_PAIRED_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: zeroclaw-config-secrets
+                  key: gateway-paired-tokens
             - name: AGENT_BROWSER_SOCKET_DIR
               value: /tmp/agent-browser
             - name: AGENT_BROWSER_ARGS
@@ -116,18 +118,6 @@ spec:
               value: /data/.zeroclaw/serena-session-id
             - name: SERENA_DEFAULT_PROJECT
               value: sam
-            - name: OPENROUTER_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: zeroclaw-secrets
-                  key: openrouter-api-key
-                  optional: true
-            - name: ANTHROPIC_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: zeroclaw-secrets
-                  key: anthropic-api-key
-                  optional: true
           securityContext:
             runAsUser: 0
             runAsGroup: 0
@@ -142,7 +132,7 @@ spec:
             - name: zeroclaw-data
               mountPath: /data
         - name: serena
-          image: citizendaniel/zeroclaw-sam:v1.1.1
+          image: citizendaniel/zeroclaw-sam:v1.2.0
           imagePullPolicy: IfNotPresent
           command:
             - sh
