@@ -12,6 +12,8 @@ data:
       default_model = "litellm-local-default-vision"
       default_temperature = 0.9
       model_support_vision = true
+      strip_prior_reasoning = true
+      context_window_tokens = 131072
 
       [autonomy]
       level = "full"
@@ -75,7 +77,7 @@ data:
 
       [channels_config]
       cli = true
-      message_timeout_secs = 120
+      message_timeout_secs = 300
 
       [channels_config.signal]
       http_url = "http://127.0.0.1:8686"
@@ -107,6 +109,7 @@ data:
       [browser]
       enabled = true
       backend = "agent_browser"
+      allowed_domains = ["*"]
 
       [identity]
       format = "openclaw"
@@ -166,6 +169,6 @@ data:
 
       [[mcp.servers]]
       name = "serena"
-      transport = "sse"
-      url = "http://127.0.0.1:9121/sse"
+      transport = "http"
+      url = "http://127.0.0.1:9121/mcp"
       tool_timeout_secs = 60
