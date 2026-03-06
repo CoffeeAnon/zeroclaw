@@ -16,6 +16,53 @@ const COMPACTION_MAX_SUMMARY_CHARS: usize = 2_000;
 /// Safety cap for durable facts extracted during pre-compaction flush.
 const COMPACTION_MAX_FLUSH_FACTS: usize = 8;
 
+/// Fraction of `context_window_tokens` at which mid-loop compaction fires.
+/// Set to 70% to leave headroom for the system prompt, tool specs, and the
+/// next LLM response.
+const COMPACTION_TRIGGER_RATIO: f64 = 0.70;
+
+/// Derive the mid-loop compaction threshold from the configured context window.
+pub(super) fn compaction_token_threshold(context_window_tokens: usize) -> usize {
+    (context_window_tokens as f64 * COMPACTION_TRIGGER_RATIO) as usize
+}
+
+/// How many recent non-system messages to keep when the mid-loop trim fires.
+/// Larger than `COMPACTION_KEEP_RECENT_MESSAGES` to preserve more working
+/// context during an active tool sequence.
+pub(super) const COMPACTION_KEEP_RECENT_MESSAGES_FOR_TRIM: usize = 30;
+
+/// Rough chars-to-tokens factor: 1 token ≈ 3 chars + 4 overhead per message.
+/// Matches the estimation used in `channels/mod.rs`.
+pub(super) fn estimated_history_tokens(history: &[ChatMessage]) -> usize {
+    history
+        .iter()
+        .map(|m| (m.content.chars().count().saturating_add(2) / 3).saturating_add(4))
+        .sum()
+}
+
+/// Strip `reasoning_content` from all assistant messages except the last one.
+/// Providers like Anthropic and OpenAI filter stale reasoning server-side,
+/// but proxy stacks (e.g. LiteLLM → llama.cpp) pass everything through.
+pub(super) fn strip_prior_reasoning(messages: &mut [ChatMessage]) {
+    let last_assistant_idx = messages
+        .iter()
+        .rposition(|m| m.role == "assistant");
+    for (i, msg) in messages.iter_mut().enumerate() {
+        if msg.role != "assistant" || Some(i) == last_assistant_idx {
+            continue;
+        }
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+            if value.get("reasoning_content").is_some() {
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("reasoning_content");
+                msg.content = value.to_string();
+            }
+        }
+    }
+}
+
 /// Trim conversation history to prevent unbounded growth.
 /// Preserves the system prompt (first message if role=system) and the most recent messages.
 pub(super) fn trim_history(history: &mut Vec<ChatMessage>, max_history: usize) {

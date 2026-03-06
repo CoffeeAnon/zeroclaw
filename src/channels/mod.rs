@@ -259,6 +259,9 @@ struct ChannelRuntimeDefaults {
     multimodal: crate::config::MultimodalConfig,
     query_classification: crate::config::QueryClassificationConfig,
     model_routes: Vec<crate::config::ModelRouteConfig>,
+    recovery: crate::config::RecoveryConfig,
+    strip_prior_reasoning: bool,
+    context_window_tokens: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1100,6 +1103,9 @@ fn runtime_defaults_from_config(config: &Config) -> ChannelRuntimeDefaults {
         multimodal: config.multimodal.clone(),
         query_classification: config.query_classification.clone(),
         model_routes: config.model_routes.clone(),
+        recovery: config.recovery.clone(),
+        strip_prior_reasoning: config.strip_prior_reasoning,
+        context_window_tokens: config.context_window_tokens,
     }
 }
 
@@ -1154,6 +1160,9 @@ fn runtime_defaults_snapshot(ctx: &ChannelRuntimeContext) -> ChannelRuntimeDefau
         multimodal: ctx.multimodal.clone(),
         query_classification: ctx.query_classification.clone(),
         model_routes: ctx.model_routes.clone(),
+        recovery: crate::config::RecoveryConfig::default(),
+        strip_prior_reasoning: false,
+        context_window_tokens: 128_000,
     }
 }
 
@@ -3443,6 +3452,12 @@ or tune thresholds in config.",
     }
 
     let history_key = conversation_history_key(&msg);
+
+    // Component 3: clear any pending followup for this sender (conversation continued)
+    if let Some(store) = crate::heartbeat::pending_followups::global_store() {
+        store.remove(&history_key).await;
+    }
+
     let conversation_lock = {
         let mut locks = ctx.conversation_locks.lock().await;
         locks
@@ -3648,7 +3663,7 @@ or tune thresholds in config.",
         "Draft streaming decision"
     );
 
-    let (delta_tx, delta_rx) = if use_streaming {
+    let (mut delta_tx, delta_rx) = if use_streaming {
         let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
         (Some(tx), Some(rx))
     } else {
@@ -3767,7 +3782,7 @@ or tune thresholds in config.",
 
     let (approval_prompt_tx, mut approval_prompt_rx) =
         tokio::sync::mpsc::unbounded_channel::<NonCliApprovalPrompt>();
-    let non_cli_approval_context = if msg.channel != "cli" && target_channel.is_some() {
+    let mut non_cli_approval_context = if msg.channel != "cli" && target_channel.is_some() {
         Some(NonCliApprovalContext {
             sender: msg.sender.clone(),
             reply_target: msg.reply_target.clone(),
@@ -3805,36 +3820,192 @@ or tune thresholds in config.",
     } else {
         None
     };
-    let llm_result = tokio::select! {
-        () = cancellation_token.cancelled() => LlmExecutionResult::Cancelled,
-        result = tokio::time::timeout(
-            Duration::from_secs(timeout_budget_secs),
-            crate::agent::loop_::scope_cost_enforcement_context(
-                cost_enforcement_context,
-                run_tool_call_loop_with_non_cli_approval_context(
-                    active_provider.as_ref(),
-                    &mut history,
-                    ctx.tools_registry.as_ref(),
-                    ctx.observer.as_ref(),
-                    route.provider.as_str(),
-                    route.model.as_str(),
-                    runtime_defaults.temperature,
-                    true,
-                    Some(ctx.approval_manager.as_ref()),
-                    msg.channel.as_str(),
-                    non_cli_approval_context,
-                    &runtime_defaults.multimodal,
-                    runtime_defaults.max_tool_iterations,
-                    Some(cancellation_token.clone()),
-                    delta_tx,
-                    ctx.hooks.as_deref(),
-                    &excluded_tools_snapshot,
-                    progress_mode,
-                    ctx.safety_heartbeat.clone(),
-                ),
-            ),
-        ) => LlmExecutionResult::Completed(result),
+    // ── Recovery-aware invocation ────────────────────────────────────────
+    //
+    // The first attempt runs normally.  If it fails with a recoverable
+    // error (e.g. model narrates tool use instead of emitting tool calls),
+    // we restore history, inject a recovery prompt, and retry — up to
+    // `max_recovery_attempts` times with exponential backoff.
+    let recovery_cfg = &runtime_defaults.recovery;
+    let max_recovery = if recovery_cfg.enabled {
+        recovery_cfg.max_recovery_attempts
+    } else {
+        0
     };
+    let mut recovery_attempt: u32 = 0;
+
+    let llm_result = loop {
+        let history_snapshot = if recovery_attempt == 0 {
+            // Only snapshot before the first attempt — subsequent snapshots
+            // are taken after the rollback, which produces the same state.
+            history.clone()
+        } else {
+            // History was already restored from snapshot before this attempt.
+            history.clone()
+        };
+
+        // First attempt uses the real streaming channel; recovery attempts
+        // do not (the draft updater is already done / cancelled).
+        let attempt_delta_tx = if recovery_attempt == 0 {
+            delta_tx.take()
+        } else {
+            None
+        };
+
+        // Approval context can only be moved once.
+        let attempt_approval_ctx = if recovery_attempt == 0 {
+            non_cli_approval_context.take()
+        } else {
+            // Recovery attempts skip non-CLI approval prompts — the original
+            // approval dispatcher is already shut down.
+            None
+        };
+
+        let attempt_temperature = if recovery_attempt > 0 && recovery_cfg.recovery_temperature > 0.0
+        {
+            recovery_cfg.recovery_temperature
+        } else {
+            runtime_defaults.temperature
+        };
+
+        let attempt_result = tokio::select! {
+            () = cancellation_token.cancelled() => LlmExecutionResult::Cancelled,
+            result = tokio::time::timeout(
+                Duration::from_secs(timeout_budget_secs),
+                crate::agent::loop_::scope_cost_enforcement_context(
+                    cost_enforcement_context.clone(),
+                    run_tool_call_loop_with_non_cli_approval_context(
+                        active_provider.as_ref(),
+                        &mut history,
+                        ctx.tools_registry.as_ref(),
+                        ctx.observer.as_ref(),
+                        route.provider.as_str(),
+                        route.model.as_str(),
+                        attempt_temperature,
+                        true,
+                        Some(ctx.approval_manager.as_ref()),
+                        msg.channel.as_str(),
+                        attempt_approval_ctx,
+                        &runtime_defaults.multimodal,
+                        runtime_defaults.max_tool_iterations,
+                        Some(cancellation_token.clone()),
+                        attempt_delta_tx,
+                        ctx.hooks.as_deref(),
+                        &excluded_tools_snapshot,
+                        progress_mode,
+                        ctx.safety_heartbeat.clone(),
+                        runtime_defaults.strip_prior_reasoning,
+                        Some(crate::agent::loop_::ToolLoopCompactionContext {
+                            memory: Some(std::sync::Arc::clone(&ctx.memory)),
+                            max_history_messages: MAX_CHANNEL_HISTORY,
+                            context_window_tokens: runtime_defaults.context_window_tokens,
+                        }),
+                    ),
+                ),
+            ) => LlmExecutionResult::Completed(result),
+        };
+
+        // Check if this attempt failed with a recoverable error and we
+        // have retries remaining.
+        let should_retry = match &attempt_result {
+            LlmExecutionResult::Completed(Ok(Err(e)))
+                if recovery_attempt < max_recovery
+                    && crate::agent::recovery::classify_error(e)
+                        == crate::agent::recovery::ErrorRecoverability::Recoverable =>
+            {
+                true
+            }
+            _ => false,
+        };
+
+        if should_retry {
+            recovery_attempt += 1;
+
+            // Extract the error message for logging before we move on.
+            let err_msg = if let LlmExecutionResult::Completed(Ok(Err(ref e))) = attempt_result {
+                scrub_credentials(&e.to_string())
+            } else {
+                String::new()
+            };
+
+            // Restore history to pre-failure state.
+            history = history_snapshot;
+
+            // Exponential backoff.
+            let backoff_ms = (recovery_cfg.backoff_base_ms as f64
+                * recovery_cfg
+                    .backoff_multiplier
+                    .powi(recovery_attempt.saturating_sub(1) as i32))
+                as u64;
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+
+            // Inject recovery prompt.
+            if recovery_attempt < max_recovery && !recovery_cfg.compress_on_final_attempt {
+                // Intermediate attempt: firm re-instruction.
+                history.push(ChatMessage::user(
+                    crate::agent::recovery::RECOVERY_PROMPT_ATTEMPT_2.to_string(),
+                ));
+            } else {
+                // Final attempt: compress context + re-state original request.
+                if recovery_cfg.compress_on_final_attempt {
+                    compact_sender_history(ctx.as_ref(), &history_key);
+                }
+                history.push(ChatMessage::user(
+                    crate::agent::recovery::recovery_prompt_attempt_final(
+                        &persisted_user_content,
+                    ),
+                ));
+            }
+
+            runtime_trace::record_event(
+                "conversation_recovery_attempt",
+                Some(msg.channel.as_str()),
+                Some(route.provider.as_str()),
+                Some(route.model.as_str()),
+                None,
+                None,
+                Some(&format!(
+                    "recovery attempt {recovery_attempt}/{max_recovery}"
+                )),
+                serde_json::json!({
+                    "attempt": recovery_attempt,
+                    "max_attempts": max_recovery,
+                    "backoff_ms": backoff_ms,
+                    "error": err_msg,
+                }),
+            );
+
+            continue; // retry
+        }
+
+        // Log successful recovery if we retried at least once.
+        if recovery_attempt > 0 {
+            if let LlmExecutionResult::Completed(Ok(Ok(_))) = &attempt_result {
+                runtime_trace::record_event(
+                    "conversation_recovery_success",
+                    Some(msg.channel.as_str()),
+                    Some(route.provider.as_str()),
+                    Some(route.model.as_str()),
+                    None,
+                    Some(true),
+                    Some(&format!(
+                        "recovered on attempt {recovery_attempt}"
+                    )),
+                    serde_json::json!({
+                        "recovery_attempts": recovery_attempt,
+                    }),
+                );
+            }
+        }
+
+        break attempt_result;
+    };
+
+    // ── Clean up streaming / approval / typing tasks ──────────────────
+    // Move the non_cli_approval_context binding so the compiler does not
+    // complain about the `take()` inside the loop requiring mutability
+    // after this point.  The variable was already consumed above.
+    let _ = non_cli_approval_context;
 
     if let Some(handle) = draft_updater {
         let _ = handle.await;
@@ -4022,6 +4193,38 @@ or tune thresholds in config.",
                 started_at.elapsed().as_millis(),
                 truncate_with_ellipsis(&delivered_response, 80)
             );
+            // Component 3: track responses that imply follow-up work
+            if runtime_defaults.recovery.stale_followup_enabled {
+                if let Some(store) = crate::heartbeat::pending_followups::global_store() {
+                    if crate::heartbeat::pending_followups::response_implies_followup(
+                        &delivered_response,
+                    ) {
+                        store
+                            .add(
+                                crate::heartbeat::pending_followups::PendingFollowup {
+                                    channel: msg.channel.clone(),
+                                    reply_target: msg.reply_target.clone(),
+                                    history_key: history_key.clone(),
+                                    created_at: std::time::SystemTime::now(),
+                                    ttl_secs: runtime_defaults
+                                        .recovery
+                                        .stale_followup_timeout_secs,
+                                    context_summary:
+                                        crate::heartbeat::pending_followups::truncate_for_summary(
+                                            &delivered_response,
+                                            200,
+                                        ),
+                                    nudge_count: 0,
+                                    max_nudges: runtime_defaults
+                                        .recovery
+                                        .stale_followup_max_nudges,
+                                },
+                            )
+                            .await;
+                    }
+                }
+            }
+
             if let Some(channel) = target_channel.as_ref() {
                 if let Some(ref draft_id) = draft_message_id {
                     if let Err(e) = channel
@@ -4187,21 +4390,55 @@ or tune thresholds in config.",
                 if !rolled_back {
                     // Close the orphan user turn so subsequent messages don't
                     // inherit this failed request as unfinished context.
+                    let history_marker = if recovery_attempt > 0 {
+                        "[Task paused after recovery attempts — ask to retry or try a different approach]"
+                    } else {
+                        "[Task failed — not continuing this request]"
+                    };
                     append_sender_turn(
                         ctx.as_ref(),
                         &history_key,
-                        ChatMessage::assistant("[Task failed — not continuing this request]"),
+                        ChatMessage::assistant(history_marker),
                     );
                 }
+
+                // Log exhausted recovery if we retried.
+                if recovery_attempt > 0 {
+                    runtime_trace::record_event(
+                        "conversation_recovery_exhausted",
+                        Some(msg.channel.as_str()),
+                        Some(route.provider.as_str()),
+                        Some(route.model.as_str()),
+                        None,
+                        Some(false),
+                        Some(&format!(
+                            "all {recovery_attempt} recovery attempts exhausted"
+                        )),
+                        serde_json::json!({
+                            "recovery_attempts": recovery_attempt,
+                            "error": scrub_credentials(&e.to_string()),
+                        }),
+                    );
+                }
+
+                let user_error = if recovery_attempt > 0 {
+                    format!(
+                        "⚠️ I tried {} approach{} but couldn't complete that action. You can ask me to try again.",
+                        recovery_attempt + 1,
+                        if recovery_attempt > 0 { "es" } else { "" },
+                    )
+                } else {
+                    format!("⚠️ Error: {e}")
+                };
                 if let Some(channel) = target_channel.as_ref() {
                     if let Some(ref draft_id) = draft_message_id {
                         let _ = channel
-                            .finalize_draft(&msg.reply_target, draft_id, &format!("⚠️ Error: {e}"))
+                            .finalize_draft(&msg.reply_target, draft_id, &user_error)
                             .await;
                     } else {
                         let _ = channel
                             .send(
-                                &SendMessage::new(format!("⚠️ Error: {e}"), &msg.reply_target)
+                                &SendMessage::new(user_error, &msg.reply_target)
                                     .in_thread(msg.thread_ts.clone()),
                             )
                             .await;
@@ -9611,6 +9848,9 @@ BTC is currently around $65,000 based on latest tool output."#
                         multimodal: crate::config::MultimodalConfig::default(),
                         query_classification: crate::config::QueryClassificationConfig::default(),
                         model_routes: Vec::new(),
+                        recovery: crate::config::RecoveryConfig::default(),
+                        strip_prior_reasoning: false,
+                        context_window_tokens: 128_000,
                     },
                     perplexity_filter: crate::config::PerplexityFilterConfig::default(),
                     outbound_leak_guard: crate::config::OutboundLeakGuardConfig::default(),

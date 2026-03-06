@@ -46,7 +46,10 @@ use execution::{
 };
 #[cfg(test)]
 use history::{apply_compaction_summary, build_compaction_transcript};
-use history::{auto_compact_history, trim_history};
+use history::{
+    auto_compact_history, compaction_token_threshold, estimated_history_tokens,
+    strip_prior_reasoning, trim_history, COMPACTION_KEEP_RECENT_MESSAGES_FOR_TRIM,
+};
 #[allow(unused_imports)]
 use parsing::{
     default_param_for_tool, detect_tool_call_parse_issue, extract_json_values, map_tool_name_alias,
@@ -313,6 +316,16 @@ tokio::task_local! {
     static SAFETY_HEARTBEAT_CONFIG: Option<SafetyHeartbeatConfig>;
     static TOOL_LOOP_PROGRESS_MODE: ProgressMode;
     static TOOL_LOOP_COST_ENFORCEMENT_CONTEXT: Option<CostEnforcementContext>;
+    static TOOL_LOOP_STRIP_PRIOR_REASONING: bool;
+    static TOOL_LOOP_COMPACTION_CONTEXT: Option<ToolLoopCompactionContext>;
+}
+
+/// Context needed for LLM-powered compaction inside the tool-call loop.
+#[derive(Clone)]
+pub(crate) struct ToolLoopCompactionContext {
+    pub memory: Option<Arc<dyn Memory>>,
+    pub max_history_messages: usize,
+    pub context_window_tokens: usize,
 }
 
 /// Configuration for periodic safety-constraint re-injection (heartbeat).
@@ -989,6 +1002,8 @@ pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
     excluded_tools: &[String],
     progress_mode: ProgressMode,
     safety_heartbeat: Option<SafetyHeartbeatConfig>,
+    strip_prior_reasoning_flag: bool,
+    compaction_context: Option<ToolLoopCompactionContext>,
 ) -> Result<String> {
     let reply_target = non_cli_approval_context
         .as_ref()
@@ -999,11 +1014,15 @@ pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
             progress_mode,
             SAFETY_HEARTBEAT_CONFIG.scope(
                 safety_heartbeat,
-                TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT.scope(
-                    non_cli_approval_context,
-                    TOOL_LOOP_REPLY_TARGET.scope(
-                        reply_target,
-                        run_tool_call_loop(
+                TOOL_LOOP_STRIP_PRIOR_REASONING.scope(
+                    strip_prior_reasoning_flag,
+                    TOOL_LOOP_COMPACTION_CONTEXT.scope(
+                        compaction_context,
+                        TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT.scope(
+                            non_cli_approval_context,
+                            TOOL_LOOP_REPLY_TARGET.scope(
+                                reply_target,
+                                run_tool_call_loop(
                             provider,
                             history,
                             tools_registry,
@@ -1022,6 +1041,8 @@ pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
                             excluded_tools,
                         ),
                     ),
+                ),
+                ),
                 ),
             ),
         )
@@ -1132,6 +1153,115 @@ pub async fn run_tool_call_loop(
             return Err(ToolLoopCancelled.into());
         }
 
+        // ── Mid-loop context management ─────────────────────────
+        // During long tool-call sequences the history vec grows unbounded.
+        // Estimate token usage and, if it exceeds a safe threshold (70% of
+        // the configured context window), first attempt LLM-powered
+        // compaction (preserves context quality), then fall back to hard
+        // trim as a safety net.
+        if iteration > 0 {
+            let compact_ctx = TOOL_LOOP_COMPACTION_CONTEXT
+                .try_with(Clone::clone)
+                .ok()
+                .flatten();
+            let threshold = compact_ctx
+                .as_ref()
+                .map(|ctx| compaction_token_threshold(ctx.context_window_tokens))
+                .unwrap_or_else(|| compaction_token_threshold(128_000));
+            let est_tokens = estimated_history_tokens(history);
+            if est_tokens > threshold {
+                let before = history.len();
+                let mut compacted_via_llm = false;
+
+                // Tier 2: LLM-powered summarization (if context available).
+                if let Some(ref compact_ctx) = compact_ctx {
+                    match auto_compact_history(
+                        history,
+                        provider,
+                        model,
+                        compact_ctx.max_history_messages,
+                        hooks,
+                        compact_ctx.memory.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            compacted_via_llm = true;
+                            let after = history.len();
+                            tracing::info!(
+                                iteration,
+                                est_tokens,
+                                threshold,
+                                messages_before = before,
+                                messages_after = after,
+                                "mid-loop LLM compaction complete"
+                            );
+                            runtime_trace::record_event(
+                                "tool_loop_mid_compact",
+                                Some(channel_name),
+                                Some(provider_name),
+                                Some(active_model.as_str()),
+                                Some(&turn_id),
+                                Some(true),
+                                Some("LLM-powered compaction mid-tool-loop"),
+                                serde_json::json!({
+                                    "iteration": iteration + 1,
+                                    "estimated_tokens_before": est_tokens,
+                                    "threshold": threshold,
+                                    "messages_before": before,
+                                    "messages_after": after,
+                                }),
+                            );
+                        }
+                        Ok(false) => {} // below threshold after re-check, skip
+                        Err(e) => {
+                            tracing::warn!(
+                                iteration,
+                                error = %e,
+                                "mid-loop LLM compaction failed, falling back to hard trim"
+                            );
+                        }
+                    }
+                }
+
+                // Tier 3: Hard trim as safety net (always runs if still over).
+                let est_after_compact = estimated_history_tokens(history);
+                if est_after_compact > threshold {
+                    let before_trim = history.len();
+                    trim_history(history, COMPACTION_KEEP_RECENT_MESSAGES_FOR_TRIM);
+                    let after_trim = history.len();
+                    if after_trim < before_trim {
+                        tracing::info!(
+                            iteration,
+                            est_tokens = est_after_compact,
+                            threshold,
+                            dropped = before_trim - after_trim,
+                            remaining = after_trim,
+                            after_llm_compact = compacted_via_llm,
+                            "mid-loop history hard trim"
+                        );
+                        runtime_trace::record_event(
+                            "tool_loop_mid_trim",
+                            Some(channel_name),
+                            Some(provider_name),
+                            Some(active_model.as_str()),
+                            Some(&turn_id),
+                            Some(true),
+                            Some("hard-trimmed history mid-tool-loop"),
+                            serde_json::json!({
+                                "iteration": iteration + 1,
+                                "estimated_tokens_before": est_after_compact,
+                                "threshold": threshold,
+                                "messages_before": before_trim,
+                                "messages_after": after_trim,
+                                "llm_compact_preceded": compacted_via_llm,
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+
         let image_marker_count = multimodal::count_image_markers(history);
         let provider_supports_vision =
             should_treat_provider_as_vision_capable(provider_name, provider);
@@ -1153,6 +1283,12 @@ pub async fn run_tool_call_loop(
         )
         .await?;
         let mut request_messages = prepared_messages.messages.clone();
+        if TOOL_LOOP_STRIP_PRIOR_REASONING
+            .try_with(|v| *v)
+            .unwrap_or(false)
+        {
+            strip_prior_reasoning(&mut request_messages);
+        }
         if let Some(prompt) = missing_tool_call_retry_prompt.take() {
             request_messages.push(ChatMessage::user(prompt));
         }
@@ -2781,29 +2917,40 @@ pub async fn run(
         } else {
             None
         };
+        let compact_ctx = ToolLoopCompactionContext {
+            memory: Some(Arc::clone(&mem)),
+            max_history_messages: config.agent.max_history_messages,
+            context_window_tokens: config.context_window_tokens,
+        };
         let response = scope_cost_enforcement_context(
             cost_enforcement_context.clone(),
             SAFETY_HEARTBEAT_CONFIG.scope(
                 hb_cfg,
                 LOOP_DETECTION_CONFIG.scope(
                     ld_cfg,
-                    run_tool_call_loop(
-                        provider.as_ref(),
-                        &mut history,
-                        &tools_registry,
-                        observer.as_ref(),
-                        provider_name,
-                        &model_name,
-                        temperature,
-                        false,
-                        approval_manager.as_ref(),
-                        channel_name,
-                        &config.multimodal,
-                        config.agent.max_tool_iterations,
-                        None,
-                        None,
-                        effective_hooks,
-                        &[],
+                    TOOL_LOOP_STRIP_PRIOR_REASONING.scope(
+                        config.strip_prior_reasoning,
+                        TOOL_LOOP_COMPACTION_CONTEXT.scope(
+                            Some(compact_ctx),
+                            run_tool_call_loop(
+                                provider.as_ref(),
+                                &mut history,
+                                &tools_registry,
+                                observer.as_ref(),
+                                provider_name,
+                                &model_name,
+                                temperature,
+                                false,
+                                approval_manager.as_ref(),
+                                channel_name,
+                                &config.multimodal,
+                                config.agent.max_tool_iterations,
+                                None,
+                                None,
+                                effective_hooks,
+                                &[],
+                            ),
+                        ),
                     ),
                 ),
             ),
@@ -2966,29 +3113,40 @@ pub async fn run(
             } else {
                 None
             };
+            let compact_ctx = ToolLoopCompactionContext {
+                memory: Some(Arc::clone(&mem)),
+                max_history_messages: config.agent.max_history_messages,
+                context_window_tokens: config.context_window_tokens,
+            };
             let response = match scope_cost_enforcement_context(
                 cost_enforcement_context.clone(),
                 SAFETY_HEARTBEAT_CONFIG.scope(
                     hb_cfg,
                     LOOP_DETECTION_CONFIG.scope(
                         ld_cfg,
-                        run_tool_call_loop(
-                            provider.as_ref(),
-                            &mut history,
-                            &tools_registry,
-                            observer.as_ref(),
-                            provider_name,
-                            &model_name,
-                            temperature,
-                            false,
-                            approval_manager.as_ref(),
-                            channel_name,
-                            &config.multimodal,
-                            config.agent.max_tool_iterations,
-                            None,
-                            None,
-                            effective_hooks,
-                            &[],
+                        TOOL_LOOP_STRIP_PRIOR_REASONING.scope(
+                            config.strip_prior_reasoning,
+                            TOOL_LOOP_COMPACTION_CONTEXT.scope(
+                                Some(compact_ctx),
+                                run_tool_call_loop(
+                                    provider.as_ref(),
+                                    &mut history,
+                                    &tools_registry,
+                                    observer.as_ref(),
+                                    provider_name,
+                                    &model_name,
+                                    temperature,
+                                    false,
+                                    approval_manager.as_ref(),
+                                    channel_name,
+                                    &config.multimodal,
+                                    config.agent.max_tool_iterations,
+                                    None,
+                                    None,
+                                    effective_hooks,
+                                    &[],
+                                ),
+                            ),
                         ),
                     ),
                 ),
@@ -4232,6 +4390,8 @@ mod tests {
             None,
             &[],
             ProgressMode::Verbose,
+            None,
+            false,
             None,
         )
         .await

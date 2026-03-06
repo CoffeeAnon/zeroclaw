@@ -273,6 +273,10 @@ pub struct Config {
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
 
+    /// Conversation recovery configuration (`[recovery]`).
+    #[serde(default)]
+    pub recovery: RecoveryConfig,
+
     /// Cron job configuration (`[cron]`).
     #[serde(default)]
     pub cron: CronConfig,
@@ -391,6 +395,20 @@ pub struct Config {
     /// - `Some(false)`: force vision support off
     #[serde(default)]
     pub model_support_vision: Option<bool>,
+
+    /// Strip `reasoning_content` from prior assistant turns before sending
+    /// requests. Useful when the backend (e.g. LiteLLM proxy → llama.cpp)
+    /// does not automatically filter stale reasoning tokens the way the
+    /// Anthropic and OpenAI APIs do server-side. Defaults to `false`.
+    #[serde(default)]
+    pub strip_prior_reasoning: bool,
+
+    /// Context window size in tokens for the active model. Used to determine
+    /// when mid-loop compaction and trimming should fire during tool-call
+    /// sequences. Set this to match your model's actual context limit.
+    /// Defaults to 128000 (128K). Compaction triggers at ~70% of this value.
+    #[serde(default = "default_context_window_tokens")]
+    pub context_window_tokens: usize,
 
     /// WASM plugin engine configuration (`[wasm]` section).
     #[serde(default)]
@@ -1123,6 +1141,10 @@ pub struct AgentSessionConfig {
     /// Default: 50.
     #[serde(default = "default_agent_session_max_messages")]
     pub max_messages: usize,
+}
+
+fn default_context_window_tokens() -> usize {
+    128_000
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -4210,6 +4232,81 @@ pub struct ClassificationRule {
 
 // ── Heartbeat ────────────────────────────────────────────────────
 
+/// Conversation recovery configuration (`[recovery]` section).
+///
+/// Controls automatic retry behaviour when the agent loop fails with a
+/// recoverable error (e.g. the model narrates an action instead of emitting
+/// a tool call).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RecoveryConfig {
+    /// Enable automatic retry-around-loop for recoverable errors. Default: `true`.
+    #[serde(default = "default_recovery_enabled")]
+    pub enabled: bool,
+
+    /// Maximum number of recovery attempts around the tool-call loop (on top
+    /// of the single in-loop retry that already exists). Default: `2`.
+    #[serde(default = "default_recovery_max_attempts")]
+    pub max_recovery_attempts: u32,
+
+    /// Initial backoff in milliseconds before the first recovery attempt.
+    /// Default: `3000` (3 seconds).
+    #[serde(default = "default_recovery_backoff_base_ms")]
+    pub backoff_base_ms: u64,
+
+    /// Exponential multiplier applied to backoff for subsequent attempts.
+    /// Default: `3.0` (3s, 9s).
+    #[serde(default = "default_recovery_backoff_multiplier")]
+    pub backoff_multiplier: f64,
+
+    /// Temperature override for recovery attempts. `0.0` means use the
+    /// default temperature. Default: `0.3`.
+    #[serde(default = "default_recovery_temperature")]
+    pub recovery_temperature: f64,
+
+    /// Whether to compact conversation history before the final recovery
+    /// attempt. Default: `true`.
+    #[serde(default = "default_recovery_compress_on_final")]
+    pub compress_on_final_attempt: bool,
+
+    /// Enable stale-followup detection via heartbeat. Default: `false`.
+    #[serde(default)]
+    pub stale_followup_enabled: bool,
+
+    /// Seconds before a pending follow-up is considered stale. Default: `300`.
+    #[serde(default = "default_stale_followup_timeout")]
+    pub stale_followup_timeout_secs: u64,
+
+    /// Maximum nudge messages sent for a single stale follow-up before giving
+    /// up. Default: `2`.
+    #[serde(default = "default_stale_followup_max_nudges")]
+    pub stale_followup_max_nudges: u32,
+}
+
+fn default_recovery_enabled() -> bool { true }
+fn default_recovery_max_attempts() -> u32 { 2 }
+fn default_recovery_backoff_base_ms() -> u64 { 3000 }
+fn default_recovery_backoff_multiplier() -> f64 { 3.0 }
+fn default_recovery_temperature() -> f64 { 0.3 }
+fn default_recovery_compress_on_final() -> bool { true }
+fn default_stale_followup_timeout() -> u64 { 300 }
+fn default_stale_followup_max_nudges() -> u32 { 2 }
+
+impl Default for RecoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_recovery_enabled(),
+            max_recovery_attempts: default_recovery_max_attempts(),
+            backoff_base_ms: default_recovery_backoff_base_ms(),
+            backoff_multiplier: default_recovery_backoff_multiplier(),
+            recovery_temperature: default_recovery_temperature(),
+            compress_on_final_attempt: default_recovery_compress_on_final(),
+            stale_followup_enabled: false,
+            stale_followup_timeout_secs: default_stale_followup_timeout(),
+            stale_followup_max_nudges: default_stale_followup_max_nudges(),
+        }
+    }
+}
+
 /// Heartbeat configuration for periodic health pings (`[heartbeat]` section).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HeartbeatConfig {
@@ -6556,6 +6653,7 @@ impl Default for Config {
             model_routes: Vec::new(),
             embedding_routes: Vec::new(),
             heartbeat: HeartbeatConfig::default(),
+            recovery: RecoveryConfig::default(),
             cron: CronConfig::default(),
             proactive_messaging: ProactiveMessagingConfig::default(),
             goal_loop: GoalLoopConfig::default(),
@@ -6586,6 +6684,8 @@ impl Default for Config {
             agents_ipc: AgentsIpcConfig::default(),
             mcp: McpConfig::default(),
             model_support_vision: None,
+            strip_prior_reasoning: false,
+            context_window_tokens: default_context_window_tokens(),
             wasm: WasmConfig::default(),
         }
     }
@@ -9336,6 +9436,20 @@ impl Config {
         }
 
         set_runtime_proxy_config(self.proxy.clone());
+
+        // Gateway paired tokens: ZEROCLAW_GATEWAY_PAIRED_TOKENS (comma-separated)
+        if let Ok(tokens) = std::env::var("ZEROCLAW_GATEWAY_PAIRED_TOKENS") {
+            let parsed: Vec<String> = tokens
+                .split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
+            if !parsed.is_empty() {
+                self.gateway.paired_tokens = parsed;
+            }
+        }
+
     }
 
     pub async fn save(&self) -> Result<()> {
@@ -10176,6 +10290,7 @@ ws_url = "ws://127.0.0.1:3002"
                 target: Some("telegram".into()),
                 to: Some("123456".into()),
             },
+            recovery: RecoveryConfig::default(),
             cron: CronConfig::default(),
             proactive_messaging: ProactiveMessagingConfig::default(),
             goal_loop: GoalLoopConfig::default(),
@@ -10243,6 +10358,8 @@ ws_url = "ws://127.0.0.1:3002"
             agents_ipc: AgentsIpcConfig::default(),
             mcp: McpConfig::default(),
             model_support_vision: None,
+            strip_prior_reasoning: false,
+            context_window_tokens: default_context_window_tokens(),
             wasm: WasmConfig::default(),
         };
 
@@ -10591,6 +10708,7 @@ tool_dispatcher = "xml"
             embedding_routes: Vec::new(),
             query_classification: QueryClassificationConfig::default(),
             heartbeat: HeartbeatConfig::default(),
+            recovery: RecoveryConfig::default(),
             cron: CronConfig::default(),
             proactive_messaging: ProactiveMessagingConfig::default(),
             goal_loop: GoalLoopConfig::default(),
@@ -10619,6 +10737,8 @@ tool_dispatcher = "xml"
             agents_ipc: AgentsIpcConfig::default(),
             mcp: McpConfig::default(),
             model_support_vision: None,
+            strip_prior_reasoning: false,
+            context_window_tokens: default_context_window_tokens(),
             wasm: WasmConfig::default(),
         };
 
@@ -13167,6 +13287,35 @@ default_model = "legacy-model"
         assert_eq!(config.gateway.port, 9000);
 
         std::env::remove_var("PORT");
+    }
+
+    #[test]
+    async fn env_override_gateway_paired_tokens() {
+        let _env_guard = env_override_lock().await;
+        let mut config = Config::default();
+        assert!(config.gateway.paired_tokens.is_empty());
+
+        std::env::set_var("ZEROCLAW_GATEWAY_PAIRED_TOKENS", "tok-a,tok-b, tok-c ");
+        config.apply_env_overrides();
+        assert_eq!(
+            config.gateway.paired_tokens,
+            vec!["tok-a", "tok-b", "tok-c"]
+        );
+
+        std::env::remove_var("ZEROCLAW_GATEWAY_PAIRED_TOKENS");
+    }
+
+    #[test]
+    async fn env_override_gateway_paired_tokens_empty_ignored() {
+        let _env_guard = env_override_lock().await;
+        let mut config = Config::default();
+        config.gateway.paired_tokens = vec!["existing".to_string()];
+
+        std::env::set_var("ZEROCLAW_GATEWAY_PAIRED_TOKENS", "  ");
+        config.apply_env_overrides();
+        assert_eq!(config.gateway.paired_tokens, vec!["existing"]);
+
+        std::env::remove_var("ZEROCLAW_GATEWAY_PAIRED_TOKENS");
     }
 
     #[test]

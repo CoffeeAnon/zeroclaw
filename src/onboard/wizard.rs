@@ -208,6 +208,7 @@ pub async fn run_wizard_with_migration(
         model_routes: Vec::new(),
         embedding_routes: Vec::new(),
         heartbeat: HeartbeatConfig::default(),
+        recovery: crate::config::RecoveryConfig::default(),
         cron: crate::config::CronConfig::default(),
         proactive_messaging: crate::config::ProactiveMessagingConfig::default(),
         goal_loop: crate::config::schema::GoalLoopConfig::default(),
@@ -237,6 +238,8 @@ pub async fn run_wizard_with_migration(
         agents_ipc: crate::config::AgentsIpcConfig::default(),
         mcp: crate::config::schema::McpConfig::default(),
         model_support_vision: None,
+        strip_prior_reasoning: false,
+        context_window_tokens: 128_000,
         wasm: crate::config::WasmConfig::default(),
     };
 
@@ -725,6 +728,7 @@ async fn run_quick_setup_with_home(
         model_routes: Vec::new(),
         embedding_routes: Vec::new(),
         heartbeat: HeartbeatConfig::default(),
+        recovery: crate::config::RecoveryConfig::default(),
         cron: crate::config::CronConfig::default(),
         proactive_messaging: crate::config::ProactiveMessagingConfig::default(),
         goal_loop: crate::config::schema::GoalLoopConfig::default(),
@@ -754,6 +758,8 @@ async fn run_quick_setup_with_home(
         agents_ipc: crate::config::AgentsIpcConfig::default(),
         mcp: crate::config::schema::McpConfig::default(),
         model_support_vision: None,
+        strip_prior_reasoning: false,
+        context_window_tokens: 128_000,
         wasm: crate::config::WasmConfig::default(),
     };
     if no_totp {
