@@ -41,7 +41,7 @@ data:
       max_cost_per_day_cents = 500
       require_approval_for_medium_risk = false
       block_high_risk_commands = false
-      non_cli_excluded_tools = ["screenshot", "browser_open"]
+      non_cli_excluded_tools = []
       non_cli_natural_language_approval_mode = "direct"
 
       [research]
