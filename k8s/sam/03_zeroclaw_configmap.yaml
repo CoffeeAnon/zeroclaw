@@ -166,6 +166,6 @@ data:
 
       [[mcp.servers]]
       name = "serena"
-      transport = "http"
-      url = "http://127.0.0.1:9121/mcp"
+      transport = "sse"
+      url = "http://127.0.0.1:9121/sse"
       tool_timeout_secs = 60

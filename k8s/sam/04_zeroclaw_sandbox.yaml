@@ -137,7 +137,7 @@ spec:
               mkdir -p /data/workspace
               cd /data/workspace
               exec /opt/sam-tools/home/.local/bin/serena start-mcp-server \
-                --transport streamable-http \
+                --transport sse \
                 --port 9121 \
                 --enable-web-dashboard false \
                 --enable-gui-log-window false \
