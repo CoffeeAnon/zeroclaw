@@ -32,15 +32,11 @@ spec:
             - -ec
             - |
               mkdir -p /data/.zeroclaw /data/.zeroclaw/workspace
-              # Seed config.toml from ConfigMap template (one-time).
+              # Always sync config.toml from ConfigMap template.
               # Secrets are injected via env vars, not in the config file.
-              if [ ! -f /data/.zeroclaw/config.toml ]; then
-                echo "Seeding zeroclaw config from ConfigMap template"
-                cp /etc/zeroclaw-template/config.toml /data/.zeroclaw/config.toml
-                chmod 600 /data/.zeroclaw/config.toml
-              else
-                echo "Config already exists, skipping seed"
-              fi
+              echo "Syncing config.toml from ConfigMap template"
+              cp /etc/zeroclaw-template/config.toml /data/.zeroclaw/config.toml
+              chmod 600 /data/.zeroclaw/config.toml
               # Seed identity files into workspace if missing.
               for f in IDENTITY.md SOUL.md USER.md AGENTS.md TOOLS.md MEMORY.md BOOTSTRAP.md HEARTBEAT.md; do
                 if [ ! -f "/data/.zeroclaw/workspace/$f" ] && [ -f "/etc/zeroclaw-template/identity/$f" ]; then

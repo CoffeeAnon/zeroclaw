@@ -15,6 +15,7 @@ data:
 
       [autonomy]
       level = "full"
+      workspace_only = false
       allowed_commands = ["*"]
       forbidden_paths = [
           "/etc",

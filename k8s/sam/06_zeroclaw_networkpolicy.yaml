@@ -4,7 +4,9 @@ metadata:
   name: zeroclaw-default-deny
   namespace: ai-agents
 spec:
-  podSelector: {}
+  podSelector:
+    matchLabels:
+      app: zeroclaw
   policyTypes:
     - Ingress
     - Egress
@@ -33,7 +35,9 @@ metadata:
   name: zeroclaw-allow-egress
   namespace: ai-agents
 spec:
-  podSelector: {}
+  podSelector:
+    matchLabels:
+      app: zeroclaw
   policyTypes:
     - Egress
   egress:
