@@ -24,6 +24,14 @@ spec:
   policyTypes:
     - Ingress
   ingress:
+    # Allow ambient mesh HBONE tunnel traffic
+    - ports:
+        - protocol: TCP
+          port: 15008
+    # Allow ambient health probes (SNAT link-local address)
+    - from:
+        - ipBlock:
+            cidr: 169.254.7.127/32
     - ports:
         - protocol: TCP
           port: 3000
