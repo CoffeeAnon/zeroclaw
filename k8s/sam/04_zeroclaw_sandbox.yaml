@@ -70,7 +70,7 @@ spec:
           image: citizendaniel/zeroclaw-sam:v1.2.0
           imagePullPolicy: IfNotPresent
           command:
-            - sh
+            - bash
             - -ec
             - |
               mkdir -p /data/.zeroclaw /data/workspace /tmp/agent-browser
@@ -86,6 +86,13 @@ spec:
                 sleep 1
               done
               [ -S /tmp/agent-browser/default.sock ] || echo "Warning: daemon socket not ready, starting zeroclaw anyway"
+              # Wait for Serena MCP sidecar to be ready.
+              echo "Waiting for Serena MCP server on port 9121..."
+              for _i in $(seq 1 60); do
+                if (echo > /dev/tcp/127.0.0.1/9121) 2>/dev/null; then echo "Serena ready." && break; fi
+                sleep 1
+              done
+              (echo > /dev/tcp/127.0.0.1/9121) 2>/dev/null || echo "Warning: Serena not ready, starting zeroclaw anyway"
               exec zeroclaw daemon
           ports:
             - name: http
@@ -104,6 +111,7 @@ spec:
                 secretKeyRef:
                   name: zeroclaw-config-secrets
                   key: gateway-paired-tokens
+                  optional: true
             - name: AGENT_BROWSER_SOCKET_DIR
               value: /tmp/agent-browser
             - name: AGENT_BROWSER_ARGS
