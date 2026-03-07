@@ -377,8 +377,8 @@ data:
     - Any workflow where an HTTP request alone won't work
 
     **Practical notes:**
-    - Prefer `snapshot` for **text content** — faster, no vision tokens
-    - Use `screenshot` when you need to **see** the page visually
+    - `snapshot` is faster and cheaper for structured text extraction
+    - `screenshot` is auto-optimized (resized to 1024px, JPEG compressed) — use it freely when you need to see the page visually or verify text in images
     - For multi-step flows, chain actions and check state after each step
 
     ---
@@ -388,7 +388,7 @@ data:
     Your model supports **vision**. When an image is included in your context, you receive the actual image data and can see it.
 
     **How images reach you:**
-    - `browser` tool with action `screenshot` — captures the browser page and embeds the image directly in your context
+    - `browser` tool with action `screenshot` — captures the browser page, auto-optimizes it (resize + JPEG compress), and embeds as a vision image in your context
     - `[IMAGE:/path/to/file.png]` marker syntax — embed any local image inline
     - `image_info` tool — read image metadata; use `include_base64: true` to also get the encoded data
 
@@ -398,7 +398,7 @@ data:
     - Inspect charts, diagrams, and visual artifacts
     - Identify UI elements, colors, and spatial relationships
 
-    **Image budget:** Up to 4 images per request, max 5 MB each.
+    **Image budget:** Up to 4 images per request. Screenshots are auto-compressed to ~200KB JPEG.
 
     ---
 
