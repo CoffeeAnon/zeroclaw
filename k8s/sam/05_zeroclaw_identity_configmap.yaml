@@ -435,41 +435,48 @@ data:
 
     `acp-client` is a CLI tool at `/usr/local/bin/acp-client` for talking to Goose, a coding agent running in the cluster, over the ACP (Agent Communication Protocol) HTTP interface.
 
-    **Quick start — one-shot task:**
+    **CRITICAL: Always use the async send/poll workflow.** Goose typically takes 1-10+ minutes to respond. The shell tool has a 60s timeout. If you use a blocking command, it will be killed before Goose finishes.
+
+    **IMPORTANT: Use the zeroclaw `shell` tool** (not `serena__execute_shell_command`) for all acp-client calls. Serena runs in a different container that does not have acp-client installed.
+
+    **Async workflow (always use this):**
     ```bash
-    acp-client ask "Review the deployment manifests in /home/goose/workspace/scrapyard-applications"
+    # 1. Check Goose is alive
+    acp-client health
+
+    # 2. Send task (returns immediately)
+    acp-client send "Create a deployment in the todolist namespace"
+    # → PENDING acp_session_id=abc-123 session_id=20260310_1
+
+    # 3. Poll status (repeat every 30-60s until COMPLETE)
+    acp-client poll abc-123
+    # → RUNNING (142s elapsed, last activity 3s ago)
+    # → ...partial response...
+
+    # 4. Get final result once COMPLETE
+    acp-client result abc-123
+
+    # 5. Cleanup when done
+    acp-client delete abc-123
     ```
 
     **All commands:**
 
-    | Command | Usage | Purpose |
-    |---------|-------|---------|
-    | `acp-client health` | `acp-client health` | Check if Goose is alive |
-    | `acp-client ask` | `acp-client ask "your task"` | One-shot: init → session → prompt → streamed response |
-    | `acp-client init` | `acp-client init` | Create ACP connection, returns `acp_session_id` |
-    | `acp-client new-session` | `acp-client new-session <acp-session-id>` | Create a Goose session within a connection |
-    | `acp-client prompt` | `acp-client prompt <session-id> <acp-session-id> "msg"` | Send a message to an existing session |
-    | `acp-client delete` | `acp-client delete <acp-session-id>` | Tear down connection |
-
-    **Multi-turn conversation:**
-    ```bash
-    acp-client init                          # → acp_session_id=abc-123
-    acp-client new-session abc-123           # → session_id=20260310_1
-    acp-client prompt 20260310_1 abc-123 "First task"
-    acp-client prompt 20260310_1 abc-123 "Follow-up question"
-    acp-client delete abc-123                # cleanup when done
-    ```
+    | Command | Purpose |
+    |---------|---------|
+    | `acp-client health` | Check if Goose is alive |
+    | `acp-client send "task"` | Non-blocking: sends prompt, returns immediately with session IDs |
+    | `acp-client poll <acp-session-id>` | Check status: RUNNING (with partial output) or COMPLETE |
+    | `acp-client result <acp-session-id>` | Get the full response text (waits up to 10s if still running) |
+    | `acp-client send-sync "task"` | **DO NOT USE** — blocks until complete, will be killed by shell timeout |
+    | `acp-client delete <acp-session-id>` | Tear down session |
+    | `acp-client cleanup` | Remove completed session files older than 1 hour |
 
     **Notes:**
     - Goose endpoint: `http://goose-acp.ai-agents.svc.cluster.local:8080`
-    - Override with: `ACP_BASE_URL=http://other-host:port acp-client ask "..."`
-    - Responses stream in real-time (SSE) — you'll see output as Goose works
-    - Goose has access to the scrapyard-applications repo and the `developer` extension
-
-    **Practical notes:**
-    - `snapshot` is faster and cheaper for structured text extraction
-    - `screenshot` is auto-optimized (resized to 1024px, JPEG compressed) — use it freely when you need to see the page visually or verify text in images
-    - For multi-step flows, chain actions and check state after each step
+    - Override with: `ACP_BASE_URL=http://other-host:port acp-client send "..."`
+    - Goose has kubectl access to the cluster and the scrapyard-applications repo
+    - Session files are stored in `/tmp/acp-sessions/<acp-session-id>/`
 
     ---
 
