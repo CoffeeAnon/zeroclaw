@@ -25,6 +25,7 @@ data:
       forbidden_paths = [
           "/etc",
           "/root",
+          "/home",
           "/usr",
           "/bin",
           "/sbin",
@@ -38,13 +39,15 @@ data:
           "~/.ssh",
           "~/.gnupg",
           "~/.aws",
+          "~/.config",
       ]
       max_actions_per_hour = 9999
-      max_cost_per_day_cents = 200
+      max_cost_per_day_cents = 500
       require_approval_for_medium_risk = false
       block_high_risk_commands = false
       non_cli_excluded_tools = []
       non_cli_natural_language_approval_mode = "direct"
+      shell_env_passthrough = ["KUBECONFIG", "GIT_CONFIG_GLOBAL"]
 
       [research]
       trigger = "never"
@@ -53,7 +56,7 @@ data:
       provider_retries = 5
 
       [agent]
-      max_tool_iterations = 200
+      max_tool_iterations = 999
       loop_detection_no_progress_threshold = 15
       loop_detection_failure_streak = 10
 

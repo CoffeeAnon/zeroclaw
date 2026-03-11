@@ -45,6 +45,7 @@ data:
       block_high_risk_commands = false
       non_cli_excluded_tools = []
       non_cli_natural_language_approval_mode = "direct"
+      shell_env_passthrough = ["ACP_AUTH_TOKEN", "ACP_BASE_URL", "ACP_CWD"]
 
       [research]
       trigger = "never"

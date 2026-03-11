@@ -38,6 +38,38 @@ spec:
       imagePullSecrets:
         - name: regcred
       initContainers:
+        - name: install-kubectl
+          image: alpine:3.21
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /data/bin
+              KUBECTL_VERSION="v1.32.3"
+              if [ -x /data/bin/kubectl ]; then
+                echo "kubectl already installed"
+              else
+                echo "Installing kubectl ${KUBECTL_VERSION}..."
+                ARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
+                wget -qO /data/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
+                chmod +x /data/bin/kubectl
+                echo "kubectl installed"
+              fi
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: zeroclaw-k8s-data
+              mountPath: /data
         - name: init-config
           image: debian:bookworm-slim
           imagePullPolicy: IfNotPresent
@@ -161,6 +193,7 @@ spec:
             - bash
             - -ec
             - |
+              export PATH="/data/bin:$PATH"
               mkdir -p /data/.zeroclaw /data/workspace
               cd /data/workspace
               # Wait for Serena MCP sidecar to be ready.
