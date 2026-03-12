@@ -7,7 +7,7 @@ data:
   daily-meeting-summary.md: |
     ---
     name: daily-meeting-summary
-    version: 1.1.0
+    version: 2.1.0
     description: Fetches and summarizes daily meeting recordings from Speakr (meetings.coffee-anon.com)
     always: true
     ---
@@ -16,44 +16,20 @@ data:
 
     Speakr (https://meetings.coffee-anon.com) is Dan's self-hosted meeting transcription app.
     It records audio, transcribes with WhisperX, diarizes speakers, and generates LLM summaries.
-    Your job is to fetch the pre-generated summaries and compile a daily digest.
+
+    The cron job produces two assets each run:
+
+    1. **Summary Aggregation** (`meetings-YYYY-MM-DD.md`) — a reference file built by a single
+       Python script with zero LLM involvement. Contains meeting metadata, Speakr's pre-generated
+       summaries, and transcript download URLs. This is the raw material.
+
+    2. **Executive Summary** (`meetings-exec-YYYY-MM-DD.md`) — you read the aggregation and
+       synthesize: action items for Dan, action items others owe Dan, and key decisions.
+       This is the only step that needs your cognition.
 
     ## Environment Notes
 
-    Your sandbox does not have `curl` installed. All HTTP requests use Python's `urllib` module,
-    which is available in the standard library. The examples below all use this approach.
-
-    ## Fetching from Speakr — The Safe Pattern
-
-    The Speakr API returns FULL recording objects including raw transcriptions, which can be
-    600K+ characters per recording. If you load that into your context, the request will exceed
-    your context window and fail. Every API call goes through this Python script, which fetches
-    the data and strips the heavy fields before printing:
-
-    ```
-    python3 -c "
-    import json, os, urllib.request
-    token = os.environ['SPEAKR_API_TOKEN']
-    req = urllib.request.Request('https://meetings.coffee-anon.com/api/recordings?q=date:today&per_page=100',
-        headers={'Authorization': f'Bearer {token}'})
-    data = json.loads(urllib.request.urlopen(req).read())
-    recs = data.get('recordings', [data] if 'id' in data else [])
-    drop = ['transcription','transcription_text','summary_html','notes_html','audio_available',
-            'audio_deleted_at','can_delete','can_edit','deletion_exempt','file_size','mime_type',
-            'original_filename','processing_time_seconds','transcription_duration_seconds',
-            'is_highlighted','is_inbox','is_owner','is_shared','has_group_tags','user_id',
-            'completed_at','created_at']
-    for r in recs:
-        for k in drop: r.pop(k, None)
-    print(json.dumps(recs, indent=2))
-    "
-    ```
-
-    To fetch a single recording by ID, change the URL to
-    `https://meetings.coffee-anon.com/api/recordings/RECORDING_ID` — the same script works
-    because it handles both list and single-object responses.
-
-    Never print raw API output without stripping first.
+    Your sandbox does not have `curl`. All HTTP requests use Python's `urllib` module.
 
     ## Bootstrap — Cron Setup
 
@@ -61,7 +37,7 @@ data:
     If not, create it with `cron_add`:
 
     - **name**: `speakr-daily-summary`
-    - **schedule**: cron `0 12,17 * * 1-5` (noon and 5pm MT, weekdays)
+    - **schedule**: cron `0 12,17 * * 1-5` (noon and 5pm PT, weekdays)
     - **timezone**: `America/Vancouver`
     - **job_type**: `agent`
     - **session_target**: `isolated`
@@ -72,72 +48,182 @@ data:
     Use this as the `prompt` field when creating the cron job:
 
     ```
-    You are running inside an isolated cron session. Your job is to execute the steps below
-    directly using `shell` and other tools. You are already inside the cron job — execute the
-    work yourself rather than dispatching it again via cron_run, which would create an infinite
-    loop of sessions each trying to re-dispatch the same job.
+    You are running inside an isolated cron session. Execute the steps below directly
+    using your tools. You are already inside the cron job — do not call cron_run, which
+    would create an infinite loop of sessions re-dispatching this same job.
 
-    Fetch today's completed meeting recordings from Speakr and write a daily digest.
+    Your job is to produce two files for today's meetings.
 
-    Step 1 — Fetch and filter recordings. The sandbox does not have curl, so use Python's urllib.
-    The filter strips transcription and other heavy fields that would blow past the context window:
+    STEP 1 — Build the Summary Aggregation (no LLM needed, one shell command).
 
-      python3 -c "
-      import json, os, urllib.request
-      token = os.environ['SPEAKR_API_TOKEN']
-      req = urllib.request.Request('https://meetings.coffee-anon.com/api/recordings?q=date:today&per_page=100',
-          headers={'Authorization': f'Bearer {token}'})
-      data = json.loads(urllib.request.urlopen(req).read())
-      recs = data.get('recordings', [])
-      drop = ['transcription','transcription_text','summary_html','notes_html','audio_available',
-              'audio_deleted_at','can_delete','can_edit','deletion_exempt','file_size','mime_type',
-              'original_filename','processing_time_seconds','transcription_duration_seconds',
-              'is_highlighted','is_inbox','is_owner','is_shared','has_group_tags','user_id',
-              'completed_at','created_at']
-      for r in recs:
-          for k in drop: r.pop(k, None)
-      print(json.dumps([r for r in recs if r.get('status')=='COMPLETED'], indent=2))
-      "
+    Run this Python script via the shell tool. It fetches the recording list, then
+    fetches each recording individually (the list endpoint omits summaries), strips
+    heavy fields, and writes the aggregation file directly to disk. Nothing is printed
+    to stdout except a short status line, so this will never overflow your context:
 
-    Step 2 — For each completed recording in the filtered output, extract:
-      - title, participants, meeting_date
-      - summary (already LLM-generated markdown — use as-is, do not re-summarize)
-      - events (action items and calendar events extracted from transcript)
-      - tags
-      - notes (if present — these are Dan's private annotations)
+      python3 << 'PYEOF'
+      import json, os, urllib.request, datetime, pathlib
 
-    If a recording has no summary yet, note it as "Summary pending" with just the title and participants.
+      BASE = 'https://meetings.coffee-anon.com'
+      TOKEN = os.environ['SPEAKR_API_TOKEN']
+      TODAY = datetime.date.today().isoformat()
+      MEM = '/data/workspace/memory'
+      OUT = f'{MEM}/meetings-{TODAY}.md'
+      DROP = {'transcription','transcription_text','summary_html','notes_html',
+              'audio_available','audio_deleted_at','can_delete','can_edit',
+              'deletion_exempt','file_size','mime_type','original_filename',
+              'processing_time_seconds','transcription_duration_seconds',
+              'is_highlighted','is_inbox','is_owner','is_shared','has_group_tags',
+              'user_id','completed_at','created_at'}
 
-    Step 3 — Write the digest to: /data/workspace/memory/meetings-YYYY-MM-DD.md (using today's date)
+      def api(path):
+          r = urllib.request.Request(f'{BASE}{path}',
+              headers={'Authorization': f'Bearer {TOKEN}'})
+          return json.loads(urllib.request.urlopen(r).read())
 
-    Format:
-      # Meetings — YYYY-MM-DD
+      # Check if an earlier run already wrote this file (noon vs 5pm)
+      previous_titles = set()
+      prev = pathlib.Path(OUT)
+      if prev.exists():
+          for line in prev.read_text().splitlines():
+              if line.startswith('## '):
+                  previous_titles.add(line[3:].strip())
 
-      ## [Meeting Title]
-      **Participants:** [names]
-      **Time:** [meeting_date formatted as HH:MM]
-      **Tags:** [tag names, comma-separated]
+      # Fetch list of today's recordings
+      data = api(f'/api/recordings?q=date:today&per_page=100')
+      recs = [r for r in data.get('recordings', []) if r.get('status') == 'COMPLETED']
 
-      ### Summary
-      [paste the summary field as-is]
+      if not recs:
+          with open(OUT, 'w') as f:
+              f.write(f'# Meetings — {TODAY}\n\nNo completed meeting recordings for today.\n')
+          print(f'No meetings today. Wrote {OUT}')
+          raise SystemExit(0)
 
-      ### Action Items
-      [list events: title, attendees, date, description]
+      ok = 0
+      failed = 0
+      pending_summaries = 0
+      new_since_last = []
 
-      ### Notes
-      [Dan's notes if present, otherwise omit this section]
+      with open(OUT, 'w') as f:
+          f.write(f'# Meetings — {TODAY}\n\n')
+          for i, rec_stub in enumerate(recs):
+              rid = rec_stub['id']
+              title = rec_stub.get('title', 'Untitled')
+              try:
+                  rec = api(f'/api/recordings/{rid}')
+                  for k in DROP:
+                      rec.pop(k, None)
+              except Exception as e:
+                  f.write(f'## {title}\n')
+                  f.write(f'*Failed to fetch recording {rid}: {e}*\n\n---\n\n')
+                  print(f'  [{i+1}/{len(recs)}] FAILED {title}: {e}')
+                  failed += 1
+                  continue
 
-      ---
-      [repeat for each meeting]
+              title = rec.get('title', title)
+              participants = rec.get('participants', 'Unknown')
+              meeting_date = rec.get('meeting_date', '')
+              time_str = meeting_date[11:16] if len(meeting_date) > 15 else meeting_date
+              tags = ', '.join(t.get('name','') for t in rec.get('tags', []))
+              summary = rec.get('summary', '')
+              notes = rec.get('notes', '')
+              events = rec.get('events', [])
 
-      ## Daily Overview
-      - **Total meetings:** N
-      - **Key decisions:** [1-2 sentence synthesis across all meetings]
-      - **Upcoming action items:** [consolidated list of events across all meetings, sorted by date]
+              if title not in previous_titles and previous_titles:
+                  new_since_last.append(title)
 
-    If there are no completed recordings today, write a short note: "No completed meeting recordings for today."
+              f.write(f'## {title}\n')
+              f.write(f'**Participants:** {participants}\n')
+              f.write(f'**Time:** {time_str}\n')
+              if tags:
+                  f.write(f'**Tags:** {tags}\n')
+              f.write(f'**Transcript:** {BASE}/recording/{rid}\n\n')
 
-    Step 4 — Store a memory: Use memory_store with key "meetings_digest_YYYY-MM-DD" and category "daily" containing a 2-3 sentence summary of the day's meetings for quick recall.
+              if summary:
+                  f.write(f'### Summary\n{summary}\n\n')
+              else:
+                  f.write('### Summary\n*Summary pending — recording may still be processing.*\n\n')
+                  pending_summaries += 1
+
+              if events:
+                  f.write('### Action Items & Events\n')
+                  for ev in events:
+                      ev_title = ev.get('title', 'Untitled')
+                      ev_date = ev.get('start_datetime', '')
+                      ev_attendees = ', '.join(ev.get('attendees', []))
+                      ev_desc = ev.get('description', '')
+                      f.write(f'- **{ev_title}**')
+                      if ev_attendees:
+                          f.write(f' ({ev_attendees})')
+                      if ev_date:
+                          f.write(f' — {ev_date}')
+                      if ev_desc:
+                          f.write(f': {ev_desc}')
+                      f.write('\n')
+                  f.write('\n')
+
+              if notes:
+                  f.write(f'### Notes\n{notes}\n\n')
+
+              f.write('---\n\n')
+              ok += 1
+              print(f'  [{i+1}/{len(recs)}] {title}')
+
+      # Print summary for the agent to relay in Step 2
+      parts = [f'Wrote {ok} meetings to {OUT}']
+      if failed:
+          parts.append(f'{failed} failed to fetch')
+      if pending_summaries:
+          parts.append(f'{pending_summaries} still processing (no summary yet)')
+      if new_since_last:
+          parts.append(f'New since last run: {", ".join(new_since_last)}')
+      print('. '.join(parts))
+      PYEOF
+
+    STEP 2 — Build the Executive Summary.
+
+    Read the file that Step 1 just wrote (meetings-YYYY-MM-DD.md) using file_read.
+    Note the status line from Step 1 — it tells you if any recordings failed to
+    fetch or are still processing (no summary yet).
+
+    Then write a second file: /data/workspace/memory/meetings-exec-YYYY-MM-DD.md
+
+    The executive summary should contain:
+
+      # Executive Summary — YYYY-MM-DD
+
+      **Meetings today:** N completed[, M still processing][, new since noon: ...]
+
+      ## Action Items for Dan
+      [Things Dan needs to do, extracted from summaries and events. Include context
+       about which meeting it came from and any deadlines.]
+
+      ## Action Items Others Owe Dan
+      [Things other participants committed to doing for Dan or that Dan is waiting on.
+       Include who, what, and when if mentioned.]
+
+      ## Key Decisions & Issues
+      [The most important decisions made and issues raised across all meetings today.
+       Keep this to the top 3-5 items — what Dan would want to know if he only had
+       30 seconds to scan this.]
+
+    If any recordings have no summary yet, add a note at the bottom:
+      > N recording(s) still processing — summaries not yet available.
+      > Run again later or check meetings-YYYY-MM-DD.md for updates.
+
+    If the script reported "New since last run: [titles]", call those out at the top
+    so Dan knows what changed since the noon run.
+
+    Keep it concise and actionable. Dan (Dan Jacobsen) is the primary reader.
+
+    STEP 3 — Store a memory.
+
+    Use memory_store with key "meetings_digest_YYYY-MM-DD" and category "daily".
+    The value should include: the number of meetings, the file paths for both
+    assets, and a one-sentence summary of the key theme. Example:
+    "4 meetings on 2026-03-12. Files: meetings-2026-03-12.md (aggregation),
+    meetings-exec-2026-03-12.md (exec summary). Focused on Q1 planning and
+    the reporting infrastructure migration."
     ```
 
     ## On-Demand Usage
@@ -145,11 +231,13 @@ data:
     When Dan asks about meetings (e.g., "what meetings did I have today?", "summarize my meetings",
     "any action items from this morning?"):
 
-    1. **Check the memory file first**: Read `/data/workspace/memory/meetings-YYYY-MM-DD.md`
+    1. **Check the exec summary first**: Read `/data/workspace/memory/meetings-exec-YYYY-MM-DD.md`
        - If it exists, use it to answer. This is the fast path.
-    2. **If the file doesn't exist or is stale**: Run the fetch manually using the safe Python
-       pattern from above. Never print raw API data without stripping.
-    3. **For past dates**: Fetch with `q=date:YYYY-MM-DD` or check `meetings-YYYY-MM-DD.md`.
+    2. **Need more detail?** Read `/data/workspace/memory/meetings-YYYY-MM-DD.md` for the
+       full summaries.
+    3. **Files don't exist?** Run the Step 1 Python script from the cron prompt above via shell,
+       then read the output file and answer directly (skip writing an exec summary for ad-hoc).
+    4. **For past dates**: Use `q=date:YYYY-MM-DD` in the API URL, or check existing files.
 
     ## API Quick Reference
 
@@ -162,30 +250,6 @@ data:
     | `GET /api/recordings?q=date_from:X&date_to:Y` | Date range |
 
     Base URL: `https://meetings.coffee-anon.com`
-
-    ## Filtered Response Shape (after stripping)
-
-    ```json
-    [{
-      "id": 123,
-      "title": "Q1 Planning Session",
-      "participants": "Dan, Tiffany, Sarah",
-      "meeting_date": "2026-03-12T14:00:00",
-      "status": "COMPLETED",
-      "summary": "## Key Discussion Points\n- ...",
-      "notes": "User's private notes (markdown)",
-      "tags": [{"name": "Client Meeting"}],
-      "events": [{
-        "title": "Demo Prep",
-        "start_datetime": "2026-03-15T14:00:00",
-        "attendees": ["Dan", "Sarah"],
-        "description": "Prepare product demo"
-      }]
-    }]
-    ```
-
-    The `summary` field is already a concise LLM summary — use it directly. Do not re-process
-    raw transcriptions. The `events` field contains extracted action items — high value for the digest.
 
     ## Deep Dive — Chunked Full Transcription
 
