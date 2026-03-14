@@ -195,6 +195,13 @@ data:
       [agents_ipc]
       enabled = true
 
+      [presentation]
+      max_output_lines = 200
+      max_output_bytes = 51200
+      strip_ansi = true
+      show_metadata = true
+      overflow_dir = "/tmp/cmd-output"
+
       [mcp]
       enabled = true
 
