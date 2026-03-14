@@ -1316,7 +1316,7 @@ impl Tool for BrowserTool {
                              "hover", "scroll", "is_visible", "close", "find",
                              "mouse_move", "mouse_click", "mouse_drag", "key_type",
                              "key_press", "screen_capture"],
-                    "description": "Browser action to perform (OS-level actions require backend=computer_use)"
+                    "description": "Browser action. Common actions and required params: open(url), get_text(selector — use 'body' for full page), click(selector), fill(selector, value), find(by, value, find_action), scroll(direction), snapshot(), screenshot(), press(key), hover(selector). OS-level actions (mouse_move, mouse_click, key_type, etc.) require backend=computer_use."
                 },
                 "url": {
                     "type": "string",
@@ -1324,11 +1324,11 @@ impl Tool for BrowserTool {
                 },
                 "selector": {
                     "type": "string",
-                    "description": "Element selector: @ref (e.g. @e1), CSS (#id, .class), or text=..."
+                    "description": "Element selector: @ref (e.g. @e1), CSS (#id, .class), text=..., or 'body' for full page. Required for get_text, click, fill, type, hover, is_visible."
                 },
                 "value": {
                     "type": "string",
-                    "description": "Value to fill or type"
+                    "description": "Value to fill, type, or search for. Required for fill, find."
                 },
                 "text": {
                     "type": "string",
@@ -1370,7 +1370,7 @@ impl Tool for BrowserTool {
                 "direction": {
                     "type": "string",
                     "enum": ["up", "down", "left", "right"],
-                    "description": "Scroll direction"
+                    "description": "Scroll direction: up, down, left, right. Required for scroll."
                 },
                 "pixels": {
                     "type": "integer",

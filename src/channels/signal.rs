@@ -516,13 +516,8 @@ impl Channel for SignalChannel {
                                 Ok(sse) => {
                                     if let Some(ref envelope) = sse.envelope {
                                         if let Some(mut msg) = self.process_envelope(envelope) {
-                                            // Prepend any buffered receipts to this real message
+                                            // Discard buffered receipts — they waste LLM context tokens
                                             if !pending_receipts.is_empty() {
-                                                let receipt_block = format!(
-                                                    "[Message delivery status since your last message:\n{}]\n\n",
-                                                    pending_receipts.join("\n")
-                                                );
-                                                msg.content = format!("{receipt_block}{}", msg.content);
                                                 pending_receipts.clear();
                                             }
                                             if tx.send(msg).await.is_err() {
@@ -555,11 +550,6 @@ impl Channel for SignalChannel {
                         if let Some(ref envelope) = sse.envelope {
                             if let Some(mut msg) = self.process_envelope(envelope) {
                                 if !pending_receipts.is_empty() {
-                                    let receipt_block = format!(
-                                        "[Message delivery status since your last message:\n{}]\n\n",
-                                        pending_receipts.join("\n")
-                                    );
-                                    msg.content = format!("{receipt_block}{}", msg.content);
                                     pending_receipts.clear();
                                 }
                                 let _ = tx.send(msg).await;
