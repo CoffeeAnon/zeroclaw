@@ -96,17 +96,31 @@ pub struct AcpSessionStore {
     sessions: Arc<Mutex<HashMap<String, AcpTransportSession>>>,
     /// Maximum session age before automatic eviction.
     ttl: std::time::Duration,
+    /// Running task handles indexed by transport session ID.
+    /// Used to abort stale tasks when a new prompt arrives or the session is deleted.
+    running_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// Maximum number of concurrent transport sessions. When exceeded, the
+    /// oldest session is aborted and evicted to make room.
+    max_concurrent: usize,
 }
 
 impl AcpSessionStore {
     pub fn new(ttl_secs: u64) -> Self {
+        Self::with_max_concurrent(ttl_secs, 1)
+    }
+
+    pub fn with_max_concurrent(ttl_secs: u64, max_concurrent: usize) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             ttl: std::time::Duration::from_secs(ttl_secs),
+            running_tasks: Arc::new(Mutex::new(HashMap::new())),
+            max_concurrent: max_concurrent.max(1),
         }
     }
 
     /// Create a new transport session. Returns the session ID.
+    ///
+    /// If the store is at capacity, the oldest session is aborted and evicted.
     pub fn create(&self) -> String {
         let id = Uuid::new_v4().to_string();
         let session = AcpTransportSession {
@@ -117,6 +131,26 @@ impl AcpSessionStore {
         };
         let mut sessions = self.sessions.lock();
         self.evict_expired(&mut sessions);
+
+        // Enforce max_concurrent: evict oldest sessions until under the limit.
+        while sessions.len() >= self.max_concurrent {
+            let oldest_id = sessions
+                .values()
+                .min_by_key(|s| s.created_at)
+                .map(|s| s.id.clone());
+            if let Some(old_id) = oldest_id {
+                tracing::info!(
+                    evicted_session = %old_id,
+                    reason = "max_concurrent_sessions exceeded",
+                    "ACP: evicting oldest session to make room"
+                );
+                sessions.remove(&old_id);
+                self.abort_task(&old_id);
+            } else {
+                break;
+            }
+        }
+
         sessions.insert(id.clone(), session);
         id
     }
@@ -133,13 +167,52 @@ impl AcpSessionStore {
         sessions.insert(session.id.clone(), session);
     }
 
-    /// Remove a transport session.
+    /// Remove a transport session and abort any running task.
     pub fn remove(&self, id: &str) -> bool {
+        self.abort_task(id);
         self.sessions.lock().remove(id).is_some()
+    }
+
+    /// Register a running task for a transport session.
+    /// If a task was already running for this session, it is aborted first.
+    pub fn register_task(&self, session_id: &str, handle: tokio::task::JoinHandle<()>) {
+        let mut tasks = self.running_tasks.lock();
+        if let Some(old_handle) = tasks.remove(session_id) {
+            tracing::info!(
+                session_id = session_id,
+                "ACP: aborting previous running task for session"
+            );
+            old_handle.abort();
+        }
+        tasks.insert(session_id.to_string(), handle);
+    }
+
+    /// Remove the running task entry (called when task completes normally).
+    pub fn unregister_task(&self, session_id: &str) {
+        self.running_tasks.lock().remove(session_id);
+    }
+
+    /// Abort a running task for the given session, if any.
+    fn abort_task(&self, session_id: &str) {
+        if let Some(handle) = self.running_tasks.lock().remove(session_id) {
+            tracing::info!(
+                session_id = session_id,
+                "ACP: aborting running task for deleted/evicted session"
+            );
+            handle.abort();
+        }
     }
 
     /// Evict sessions older than TTL.
     fn evict_expired(&self, sessions: &mut HashMap<String, AcpTransportSession>) {
+        let expired: Vec<String> = sessions
+            .iter()
+            .filter(|(_, s)| s.created_at.elapsed() >= self.ttl)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &expired {
+            self.abort_task(id);
+        }
         sessions.retain(|_, s| s.created_at.elapsed() < self.ttl);
     }
 
@@ -462,8 +535,16 @@ async fn handle_session_prompt(
     // Spawn the agent loop in a background task.
     // Inner spawn lets the outer task await the JoinHandle — if the inner task
     // panics, JoinHandle returns Err(JoinError) instead of silently swallowing it.
+    //
+    // The outer handle is registered with the store so that:
+    // - A new `session/prompt` on the same session aborts the old task first
+    // - `DELETE /acp` aborts any in-flight task
+    // - Exceeding `max_concurrent_sessions` aborts the oldest session's task
     let tx_panic = tx.clone();
-    tokio::spawn(async move {
+    let task_session_id = transport_id.clone();
+    let register_session_id = transport_id.clone();
+    let store_for_unregister = store.clone();
+    let handle = tokio::spawn(async move {
         tracing::info!("ACP agent task spawned, calling run_acp_agent_loop");
         let inner_tx = tx.clone();
         let join_result = tokio::spawn(async move {
@@ -499,28 +580,37 @@ async fn handle_session_prompt(
                 let _ = tx.send(sse_line(&err)).await;
             }
             Err(join_err) => {
-                let panic_msg = if join_err.is_panic() {
-                    let payload = join_err.into_panic();
-                    if let Some(s) = payload.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = payload.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown panic payload".to_string()
-                    }
+                if join_err.is_cancelled() {
+                    tracing::info!("ACP agent task was cancelled (session evicted or replaced)");
+                    let err = jsonrpc_error(&request_id, -32000, "Task cancelled: session was replaced or deleted");
+                    let _ = tx_panic.send(sse_line(&err)).await;
                 } else {
-                    format!("task cancelled: {join_err}")
-                };
-                tracing::error!(panic = %panic_msg, "ACP agent loop PANICKED");
-                let err = jsonrpc_error(
-                    &request_id,
-                    -32000,
-                    &format!("Agent panic: {panic_msg}"),
-                );
-                let _ = tx_panic.send(sse_line(&err)).await;
+                    let panic_msg = if join_err.is_panic() {
+                        let payload = join_err.into_panic();
+                        if let Some(s) = payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = payload.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else {
+                            "unknown panic payload".to_string()
+                        }
+                    } else {
+                        format!("task error: {join_err}")
+                    };
+                    tracing::error!(panic = %panic_msg, "ACP agent loop PANICKED");
+                    let err = jsonrpc_error(
+                        &request_id,
+                        -32000,
+                        &format!("Agent panic: {panic_msg}"),
+                    );
+                    let _ = tx_panic.send(sse_line(&err)).await;
+                }
             }
         }
+        // Unregister task when complete (normal or error).
+        store_for_unregister.unregister_task(&task_session_id);
     });
+    store.register_task(&register_session_id, handle);
 
     // Convert the receiver into an SSE stream
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -844,7 +934,7 @@ mod tests {
 
     #[test]
     fn multiple_concurrent_sessions_are_isolated() {
-        let store = AcpSessionStore::new(3600);
+        let store = AcpSessionStore::with_max_concurrent(3600, 10);
         let id1 = store.create();
         let id2 = store.create();
 
