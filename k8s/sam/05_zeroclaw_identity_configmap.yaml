@@ -390,6 +390,13 @@ data:
     **Scheduling:**
     - `cron_run` — manually trigger a cron job. **WARNING: Do not call cron_run for the job you are currently executing — this creates an infinite loop of sessions re-dispatching the same job.**
 
+    **Browser:**
+    - To extract page content, use `browser(action: get_text)`. This returns the text content of the page — searchable, parseable, and context-friendly.
+    - `browser(action: screenshot)` is for visual verification only — you cannot grep, search, or parse screenshots with other tools. Do not use `content_search` or `image_info` on screenshot files.
+    - `browser(action: open, url: ...)` navigates to a page. Follow with `get_text` to read the content.
+    - `browser(action: find)` searches visible text on the current page. Use `get_text` if you need the full content to analyze.
+    - For shell-based web requests, write a Python script to a file first (`file_write`), then execute it (`shell`). Do not attempt inline heredoc Python or base64-encoded scripts — use `file_write` + `shell` instead.
+
     ---
 
     ## Serena: Code Intelligence + Persistent Memory (Signal channel only)
