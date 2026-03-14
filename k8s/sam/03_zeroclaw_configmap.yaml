@@ -39,6 +39,7 @@ data:
           "~/.aws",
           "~/.config",
       ]
+      allowed_roots = ["/tmp/cmd-output"]
       max_actions_per_hour = 9999
       max_cost_per_day_cents = 500
       require_approval_for_medium_risk = false
