@@ -9,7 +9,7 @@ data:
       #   API_KEY                          — LiteLLM proxy API key
       #   ZEROCLAW_GATEWAY_PAIRED_TOKENS   — comma-separated gateway auth tokens
       default_provider = "custom:https://assistant-api.coffee-anon.com/v1"
-      default_model = "litellm-local-default-vision"
+      default_model = "litellm-sam"
       default_temperature = 0.9
       model_support_vision = true
       strip_prior_reasoning = true

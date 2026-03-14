@@ -7,7 +7,7 @@ data:
   daily-meeting-summary.md: |
     ---
     name: daily-meeting-summary
-    version: 2.1.0
+    version: 2.2.0
     description: Fetches and summarizes daily meeting recordings from Speakr (meetings.coffee-anon.com)
     always: true
     ---
@@ -30,6 +30,19 @@ data:
     ## Environment Notes
 
     Your sandbox does not have `curl`. All HTTP requests use Python's `urllib` module.
+
+    ## Tool Routing
+
+    This skill uses your **native zeroclaw tools** exclusively:
+    - `shell` — run Python scripts (for API calls, file generation)
+    - `file_read` / `file_write` — read and write meeting files
+    - `memory_store` / `memory_recall` — persist and retrieve meeting digests
+    - `cron_list` / `cron_add` — manage the scheduled job
+    - `content_search` — search within transcript files
+
+    Your meeting data lives in your pod's local filesystem (`/data/workspace/memory/`)
+    and SQLite memory store. Serena's memory is a separate system for code analysis —
+    it has no access to your meeting files. Do not use Serena tools for any meeting task.
 
     ## Bootstrap — Cron Setup
 
@@ -182,11 +195,11 @@ data:
 
     STEP 2 — Build the Executive Summary.
 
-    Read the file that Step 1 just wrote (meetings-YYYY-MM-DD.md) using file_read.
+    Read the file that Step 1 just wrote (meetings-YYYY-MM-DD.md) using `file_read`.
     Note the status line from Step 1 — it tells you if any recordings failed to
     fetch or are still processing (no summary yet).
 
-    Then write a second file: /data/workspace/memory/meetings-exec-YYYY-MM-DD.md
+    Then use `file_write` to create: /data/workspace/memory/meetings-exec-YYYY-MM-DD.md
 
     The executive summary should contain:
 
@@ -218,7 +231,7 @@ data:
 
     STEP 3 — Store a memory.
 
-    Use memory_store with key "meetings_digest_YYYY-MM-DD" and category "daily".
+    Use `memory_store` with key "meetings_digest_YYYY-MM-DD" and category "daily".
     The value should include: the number of meetings, the file paths for both
     assets, and a one-sentence summary of the key theme. Example:
     "4 meetings on 2026-03-12. Files: meetings-2026-03-12.md (aggregation),
@@ -231,13 +244,15 @@ data:
     When Dan asks about meetings (e.g., "what meetings did I have today?", "summarize my meetings",
     "any action items from this morning?"):
 
-    1. **Check the exec summary first**: Read `/data/workspace/memory/meetings-exec-YYYY-MM-DD.md`
-       - If it exists, use it to answer. This is the fast path.
-    2. **Need more detail?** Read `/data/workspace/memory/meetings-YYYY-MM-DD.md` for the
-       full summaries.
-    3. **Files don't exist?** Run the Step 1 Python script from the cron prompt above via shell,
+    1. **Quick check** — `memory_recall` key `meetings_digest_YYYY-MM-DD`. This is the cheapest
+       lookup and tells you whether data exists, the file paths, and a one-line theme summary.
+    2. **Read the exec summary** — `file_read` `/data/workspace/memory/meetings-exec-YYYY-MM-DD.md`.
+       If it exists, use it to answer. This is the fast path.
+    3. **Need more detail?** `file_read` `/data/workspace/memory/meetings-YYYY-MM-DD.md` for the
+       full per-meeting summaries.
+    4. **Nothing found?** Run the Step 1 Python script from the cron prompt above via `shell`,
        then read the output file and answer directly (skip writing an exec summary for ad-hoc).
-    4. **For past dates**: Use `q=date:YYYY-MM-DD` in the API URL, or check existing files.
+    5. **Past dates**: Use `q=date:YYYY-MM-DD` in the API URL, or check existing files.
 
     ## API Quick Reference
 
@@ -259,35 +274,40 @@ data:
 
     **Step 1 — Download transcription to disk:**
     ```
-    python3 -c "
+    python3 << 'PYEOF'
     import json, os, urllib.request
-    rec_id = 'RECORDING_ID'
-    token = os.environ['SPEAKR_API_TOKEN']
-    req = urllib.request.Request(f'https://meetings.coffee-anon.com/api/recordings/{rec_id}',
-        headers={'Authorization': f'Bearer {token}'})
+
+    REC_ID = 'RECORDING_ID'  # Replace with actual recording ID
+    BASE = 'https://meetings.coffee-anon.com'
+    TOKEN = os.environ['SPEAKR_API_TOKEN']
+
+    req = urllib.request.Request(f'{BASE}/api/recordings/{REC_ID}',
+        headers={'Authorization': f'Bearer {TOKEN}'})
     r = json.loads(urllib.request.urlopen(req).read())
     t = r.get('transcription', [])
-    out = f'# Transcript: {r.get(\"title\",\"Untitled\")}\n'
-    out += f'# Participants: {r.get(\"participants\",\"Unknown\")}\n'
-    out += f'# Date: {r.get(\"meeting_date\",\"Unknown\")}\n'
-    out += f'# Segments: {len(t) if isinstance(t,list) else \"plain-text\"}\n'
+
+    out = f'# Transcript: {r.get("title", "Untitled")}\n'
+    out += f'# Participants: {r.get("participants", "Unknown")}\n'
+    out += f'# Date: {r.get("meeting_date", "Unknown")}\n'
+    out += f'# Segments: {len(t) if isinstance(t, list) else "plain-text"}\n'
     if isinstance(t, list) and t:
-        out += f'# Duration: {t[-1].get(\"end\",\"unknown\")}s\n'
+        out += f'# Duration: {t[-1].get("end", "unknown")}s\n'
     out += '---\n'
     if isinstance(t, list):
         for seg in t:
-            speaker = seg.get('speaker','?')
-            text = seg.get('text', seg.get('sentence',''))
-            start = seg.get('start', seg.get('start_time',0))
+            speaker = seg.get('speaker', '?')
+            text = seg.get('text', seg.get('sentence', ''))
+            start = seg.get('start', seg.get('start_time', 0))
             out += f'[{int(start//60):02d}:{int(start%60):02d}] {speaker}: {text}\n'
     else:
         out += str(t)
-    path = f'/data/workspace/memory/transcript-{rec_id}.md'
-    with open(path,'w') as f:
+
+    path = f'/data/workspace/memory/transcript-{REC_ID}.md'
+    with open(path, 'w') as f:
         f.write(out)
     print(f'Wrote {len(out):,} chars to {path}')
-    print(f'Segments: {len(t) if isinstance(t,list) else \"plain-text\"}')
-    "
+    print(f'Segments: {len(t) if isinstance(t, list) else "plain-text"}')
+    PYEOF
     ```
 
     **Step 2 — Read in chunks using file_read with offset/limit:**
