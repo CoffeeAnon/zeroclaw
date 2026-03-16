@@ -1091,4 +1091,205 @@ mod tests {
             .join("\n");
         assert_eq!(combined, "hello\n world");
     }
+
+    // ── session/inject tests ────────────────────────────────────
+
+    #[test]
+    fn session_store_create_has_no_injection_tx() {
+        let store = AcpSessionStore::new(3600);
+        let id = store.create();
+        let session = store.get(&id).unwrap();
+        assert!(session.injection_tx.is_none());
+    }
+
+    #[test]
+    fn session_store_injection_tx_persists_through_update() {
+        let store = AcpSessionStore::new(3600);
+        let id = store.create();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::channels::injection::InjectedMessage,
+        >();
+
+        let mut session = store.get(&id).unwrap();
+        session.injection_tx = Some(tx);
+        store.update(session);
+
+        let updated = store.get(&id).unwrap();
+        assert!(updated.injection_tx.is_some());
+    }
+
+    #[test]
+    fn session_store_injection_tx_cleared_on_none_update() {
+        let store = AcpSessionStore::new(3600);
+        let id = store.create();
+
+        // Set injection_tx
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::channels::injection::InjectedMessage,
+        >();
+        let mut session = store.get(&id).unwrap();
+        session.injection_tx = Some(tx);
+        store.update(session);
+
+        // Clear it
+        let mut session = store.get(&id).unwrap();
+        session.injection_tx = None;
+        store.update(session);
+
+        let final_session = store.get(&id).unwrap();
+        assert!(final_session.injection_tx.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_inject_without_running_task_returns_error() {
+        let store = AcpSessionStore::new(3600);
+        let transport_id = store.create();
+        let mut session = store.get(&transport_id).unwrap();
+        session.agent_session_id = Some("acp:test-123".to_string());
+        store.update(session);
+
+        let req = JsonRpcRequest {
+            jsonrpc: Some("2.0".into()),
+            method: "session/inject".into(),
+            id: serde_json::json!(1),
+            params: serde_json::json!({
+                "sessionId": "acp:test-123",
+                "prompt": [{"type": "text", "text": "correction"}]
+            }),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("Acp-Session-Id", transport_id.parse().unwrap());
+
+        let resp = handle_session_inject(&req, &headers, &store).await;
+        let body = extract_sse_body(resp).await;
+        let msg = parse_sse_jsonrpc(&body);
+        assert!(msg["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("No running task"));
+    }
+
+    #[tokio::test]
+    async fn session_inject_with_active_channel_queues_message() {
+        let store = AcpSessionStore::new(3600);
+        let transport_id = store.create();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::channels::injection::InjectedMessage,
+        >();
+        let mut session = store.get(&transport_id).unwrap();
+        session.agent_session_id = Some("acp:test-456".to_string());
+        session.injection_tx = Some(tx);
+        store.update(session);
+
+        let req = JsonRpcRequest {
+            jsonrpc: Some("2.0".into()),
+            method: "session/inject".into(),
+            id: serde_json::json!(2),
+            params: serde_json::json!({
+                "sessionId": "acp:test-456",
+                "prompt": [{"type": "text", "text": "CORRECTION: use SQLite"}]
+            }),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("Acp-Session-Id", transport_id.parse().unwrap());
+
+        let resp = handle_session_inject(&req, &headers, &store).await;
+        let body = extract_sse_body(resp).await;
+        let msg = parse_sse_jsonrpc(&body);
+        assert_eq!(msg["result"]["injected"], true);
+
+        let injected = rx.try_recv().expect("should have received injected message");
+        assert_eq!(injected.content, "CORRECTION: use SQLite");
+        assert_eq!(injected.channel, "acp");
+    }
+
+    #[tokio::test]
+    async fn session_inject_invalid_session_returns_error() {
+        let store = AcpSessionStore::new(3600);
+        let req = JsonRpcRequest {
+            jsonrpc: Some("2.0".into()),
+            method: "session/inject".into(),
+            id: serde_json::json!(3),
+            params: serde_json::json!({
+                "sessionId": "acp:nonexistent",
+                "prompt": [{"type": "text", "text": "hello"}]
+            }),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("Acp-Session-Id", "bogus-id".parse().unwrap());
+
+        let resp = handle_session_inject(&req, &headers, &store).await;
+        let body = extract_sse_body(resp).await;
+        let msg = parse_sse_jsonrpc(&body);
+        assert!(msg["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid or expired"));
+    }
+
+    #[tokio::test]
+    async fn session_inject_empty_message_returns_error() {
+        let store = AcpSessionStore::new(3600);
+        let transport_id = store.create();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::channels::injection::InjectedMessage,
+        >();
+        let mut session = store.get(&transport_id).unwrap();
+        session.injection_tx = Some(tx);
+        store.update(session);
+
+        let req = JsonRpcRequest {
+            jsonrpc: Some("2.0".into()),
+            method: "session/inject".into(),
+            id: serde_json::json!(4),
+            params: serde_json::json!({
+                "sessionId": "acp:test-789",
+                "prompt": [{"type": "text", "text": ""}]
+            }),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("Acp-Session-Id", transport_id.parse().unwrap());
+
+        let resp = handle_session_inject(&req, &headers, &store).await;
+        let body = extract_sse_body(resp).await;
+        let msg = parse_sse_jsonrpc(&body);
+        assert!(msg["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Empty inject message"));
+    }
+
+    #[tokio::test]
+    async fn session_inject_closed_channel_returns_error() {
+        let store = AcpSessionStore::new(3600);
+        let transport_id = store.create();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::channels::injection::InjectedMessage,
+        >();
+        let mut session = store.get(&transport_id).unwrap();
+        session.injection_tx = Some(tx);
+        store.update(session);
+        drop(rx); // close the channel
+
+        let req = JsonRpcRequest {
+            jsonrpc: Some("2.0".into()),
+            method: "session/inject".into(),
+            id: serde_json::json!(5),
+            params: serde_json::json!({
+                "sessionId": "acp:test-closed",
+                "prompt": [{"type": "text", "text": "should fail"}]
+            }),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("Acp-Session-Id", transport_id.parse().unwrap());
+
+        let resp = handle_session_inject(&req, &headers, &store).await;
+        let body = extract_sse_body(resp).await;
+        let msg = parse_sse_jsonrpc(&body);
+        assert!(msg["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Injection channel closed"));
+    }
 }
