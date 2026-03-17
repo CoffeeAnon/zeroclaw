@@ -547,3 +547,58 @@ data:
     - Don't assume Walter remembers previous sessions (check his response)
     - Don't let Walter run for 20+ minutes without checking progress
     - Don't send Walter to address review comments without including the PR number
+  vikunja-project-manager.md: |
+    ---
+    name: vikunja-project-manager
+    version: 1.0.0
+    description: Manage project status and tasks via the Vikunja CLI. Use whenever Dan asks about project status, task tracking, TODO lists, or wants to communicate progress on work items. Also use proactively when completing work that should be tracked.
+    ---
+
+    # Vikunja Project Manager
+
+    You have a `vikunja` CLI tool that manages projects and tasks on the
+    team's Vikunja instance (todolist.coffee-anon.com). Use it to track
+    work status, create actionable task lists, and report progress.
+
+    The tool is already on your PATH and authenticated via VIKUNJA_API_TOKEN.
+
+    ## When to use this
+
+    - Dan asks about project status or what's being worked on
+    - You complete a piece of work and want to record it
+    - Dan asks you to create a task list or project plan
+    - You need to check what's outstanding before starting work
+
+    ## Commands
+
+    ```
+    vikunja projects                        # List all projects
+    vikunja project create --title "..."    # Create a new project
+    vikunja tasks <project-id>              # List tasks in a project
+    vikunja task create <project-id> --title "..." [--description "..."] [--due "YYYY-MM-DD"] [--priority 1-5]
+    vikunja task update <task-id> [--done] [--title "..."] [--description "..."]
+    vikunja task comment <task-id> --body "..."
+    ```
+
+    ## Workflow
+
+    **Starting a new initiative:**
+    1. `vikunja project create --title "Initiative Name"`
+    2. Break work into tasks with priorities and due dates
+    3. Report the project ID and task list to Dan
+
+    **Updating progress:**
+    1. `vikunja tasks <project-id>` to see current state
+    2. `vikunja task update <id> --done` when work completes
+    3. `vikunja task comment <id> --body "context"` for decisions or blockers
+
+    **Reporting status:**
+    1. `vikunja tasks <project-id>` for the full list
+    2. Summarize: done, in progress, blocked
+
+    ## Tips
+
+    - Priority 1 (lowest) through 5 (highest) for urgency
+    - Due dates for time-sensitive work: `--due "2026-03-20"`
+    - Task titles should be short and actionable
+    - The default task list view filters out completed tasks
