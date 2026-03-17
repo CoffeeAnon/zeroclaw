@@ -66,9 +66,9 @@ data:
 
     Three strategies, in order of preference:
 
-    **Refs from snapshot** — After a snapshot, each element has a ref number.
-    Use `action: click, selector: "ref=42"` to interact. Most reliable because
-    the ref matches the current DOM.
+    **Refs from snapshot** — After a snapshot, each interactive element has a
+    ref like `@e1`, `@e2`, etc. Use `action: click, selector: "@e42"` to
+    interact. Most reliable because the ref matches the current DOM state.
 
     **Semantic find** — Use when you know the visible text or role without
     needing a snapshot first: `action: find, by: text, value: "Submit", action: click`
@@ -108,7 +108,10 @@ data:
     ## Common Mistakes
 
     - Screenshotting to read text — snapshot or get_text is faster and parseable
-    - Guessing CSS selectors without a snapshot — snapshot first, use the refs
+    - Guessing CSS selectors without a snapshot — snapshot first, use @eN refs
+    - Using wrong ref format — it's `@e1` not `ref=1` or `#ref1`
     - Rapid-fire actions without waits — the browser is async, give it time
     - Retrying the same failing action — if it failed twice, change your approach
     - Using browser for API calls — use Python urllib instead
+    - Letting snapshots accumulate — large snapshots (10-70KB each) grow the
+      context fast. If visiting multiple sites, `action: close` between them
