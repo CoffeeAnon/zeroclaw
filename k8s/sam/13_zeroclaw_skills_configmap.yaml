@@ -583,7 +583,8 @@ data:
     ## Workflow
 
     **Starting a new initiative:**
-    1. `vikunja project create --title "Initiative Name"`
+    1. `vikunja projects` — check if a project already exists before creating one
+    2. `vikunja project create --title "Initiative Name"` (only if needed)
     2. Break work into tasks with priorities and due dates
     3. Report the project ID and task list to Dan
 
