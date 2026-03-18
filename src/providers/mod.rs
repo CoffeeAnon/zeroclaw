@@ -1413,11 +1413,12 @@ fn create_provider_with_url_and_options(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or("llama.cpp");
-            Ok(Box::new(OpenAiCompatibleProvider::new(
+            Ok(Box::new(OpenAiCompatibleProvider::new_with_vision(
                 "llama.cpp",
                 base_url,
                 Some(llama_cpp_key),
                 AuthStyle::Bearer,
+                true,
             )))
         }
         "sglang" => {
