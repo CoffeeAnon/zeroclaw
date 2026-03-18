@@ -1845,16 +1845,22 @@ pub async fn run_tool_call_loop(
 
                 // Preserve native tool call IDs in assistant history so role=tool
                 // follow-up messages can reference the exact call id.
+                //
+                // Sanitize response_text before storing in history: strip malformed
+                // <tool_call> tags that the parser couldn't parse. These raw tags
+                // corrupt llama-server's Jinja chat template on subsequent requests.
+                let sanitized_text =
+                    parsing::strip_unparsed_tool_call_tags(&response_text);
                 let assistant_history_content = if native_calls.is_empty() {
                     if use_native_tools {
                         build_native_assistant_history_from_parsed_calls(
-                            &response_text,
+                            &sanitized_text,
                             &calls,
                             reasoning_content.as_deref(),
                         )
-                        .unwrap_or_else(|| response_text.clone())
+                        .unwrap_or_else(|| sanitized_text.clone())
                     } else {
-                        response_text.clone()
+                        sanitized_text.clone()
                     }
                 } else {
                     build_native_assistant_history(
@@ -2036,7 +2042,10 @@ pub async fn run_tool_call_loop(
                     )));
                 }
             }
-            history.push(ChatMessage::assistant(response_text.clone()));
+            // Sanitize before storing — strip any malformed <tool_call> tags
+            // that slipped into a text-only response.
+            let sanitized = parsing::strip_unparsed_tool_call_tags(&response_text);
+            history.push(ChatMessage::assistant(sanitized));
             return Ok(display_text);
         }
 
@@ -7855,6 +7864,33 @@ Let me check the result."#;
     }
 
     // ── strip_unparsed_tool_call_tags tests ─────────────────
+
+    #[test]
+    fn native_history_builder_sanitizes_malformed_tags_from_content() {
+        // When the model emits empty <tool_call> tags, the native history builder
+        // stores them in the "content" field. These must be stripped before storage.
+        let response_text = "Let me check.\n<tool_call>\n</tool_call>";
+        let calls: Vec<parsing::ParsedToolCall> = vec![];
+
+        // Sanitize before building history (this is what the agent loop should do)
+        let sanitized = parsing::strip_unparsed_tool_call_tags(response_text);
+        assert!(!sanitized.contains("<tool_call>"));
+
+        let native = build_native_assistant_history_from_parsed_calls(
+            &sanitized,
+            &calls,
+            None,
+        );
+        // With empty calls, returns Some with empty tool_calls array
+        let history = native.expect("returns Some even with empty calls");
+
+        // The content field should not contain raw tool_call tags
+        assert!(
+            !history.contains("<tool_call>"),
+            "history content should not contain raw tool_call tags: {history}"
+        );
+        assert!(history.contains("Let me check."));
+    }
 
     #[test]
     fn strip_unparsed_tool_call_tags_removes_empty_tags() {
