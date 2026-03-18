@@ -36,7 +36,7 @@ mod context;
 pub(crate) mod detection;
 mod execution;
 pub(crate) mod history;
-mod parsing;
+pub(crate) mod parsing;
 
 use context::{build_context, build_hardware_context};
 use detection::{DetectionVerdict, LoopDetectionConfig, LoopDetector};

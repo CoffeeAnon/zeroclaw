@@ -1644,11 +1644,19 @@ impl OpenAiCompatibleProvider {
 
                         // Some OpenAI-compatible providers (including NVIDIA NIM models)
                         // reject assistant tool-call messages if `content` is omitted.
-                        let content = value
+                        //
+                        // Strip residual <tool_call> tags from content — defense-in-depth.
+                        // If the agent loop's sanitization missed malformed tags, remove
+                        // them here before they reach llama-server's template parser.
+                        let raw_content = value
                             .get("content")
                             .and_then(serde_json::Value::as_str)
                             .map(ToString::to_string)
                             .unwrap_or_default();
+                        let content =
+                            crate::agent::loop_::parsing::strip_unparsed_tool_call_tags(
+                                &raw_content,
+                            );
 
                         let reasoning_content = value
                             .get("reasoning_content")
@@ -1724,11 +1732,22 @@ impl OpenAiCompatibleProvider {
                 }
             }
 
+            // Strip residual <tool_call> tags from assistant messages that
+            // fell through to the generic path (empty tool_calls, failed parse).
+            let content_str = if message.role == "assistant" {
+                std::borrow::Cow::Owned(
+                    crate::agent::loop_::parsing::strip_unparsed_tool_call_tags(
+                        &message.content,
+                    ),
+                )
+            } else {
+                std::borrow::Cow::Borrowed(message.content.as_str())
+            };
             native_messages.push(NativeMessage {
                 role: message.role.clone(),
                 content: Some(Self::to_message_content(
                     &message.role,
-                    &message.content,
+                    &content_str,
                     allow_user_image_parts,
                 )),
                 tool_call_id: None,
@@ -4701,5 +4720,35 @@ mod tests {
             "reasoning_content should be present when Some"
         );
         assert!(json.contains("thinking..."));
+    }
+
+    #[test]
+    fn convert_messages_strips_tool_call_tags_from_assistant_content() {
+        use crate::providers::ChatMessage;
+
+        // Simulate: assistant message with malformed <tool_call> in content field
+        // (from a previous turn where the model emitted an empty tag)
+        let history_json = serde_json::json!({
+            "content": "Let me check.\n<tool_call>\n</tool_call>",
+            "tool_calls": []
+        });
+        let messages = vec![
+            ChatMessage::user("Do something".to_string()),
+            ChatMessage::assistant(history_json.to_string()),
+        ];
+
+        let native = OpenAiCompatibleProvider::convert_messages_for_native(&messages, true);
+
+        // The assistant content should not contain raw <tool_call> tags
+        for msg in &native {
+            if msg.role == "assistant" {
+                if let Some(MessageContent::Text(content)) = &msg.content {
+                    assert!(
+                        !content.contains("<tool_call>"),
+                        "assistant content should be sanitized: {content}"
+                    );
+                }
+            }
+        }
     }
 }

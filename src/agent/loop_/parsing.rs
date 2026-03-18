@@ -1731,7 +1731,7 @@ pub(super) fn parse_structured_tool_calls(
 ///
 /// This function removes every tool-call tag pair (and unclosed open tags),
 /// preserving the surrounding text.
-pub(super) fn strip_unparsed_tool_call_tags(text: &str) -> String {
+pub(crate) fn strip_unparsed_tool_call_tags(text: &str) -> String {
     // Fast path: no tags at all
     if !TOOL_CALL_OPEN_TAGS.iter().any(|tag| text.contains(tag)) {
         return text.to_string();
