@@ -21,13 +21,18 @@ data:
     CRON_EXPR = "*/30 * * * *"
     SCHEDULE_JSON = '{"kind":"cron","expr":"0 */30 * * * *","tz":"America/Edmonton"}'
     PROMPT = (
-        "Run gitea-pr check-reviews to see if any of your open PRs have "
-        "unaddressed review comments. If ACTION NEEDED is reported, use the "
-        "k8s-manifest-builder skill's 'Addressing PR Review Comments' section "
-        "(Phase READ through Phase REPORT) to address each PR's feedback. "
-        "If all clear, no action needed — end the session immediately. "
-        "Do not search for files, check memories, or perform any other work "
-        "beyond what check-reviews reports."
+        "Check for open PRs that need attention.\n"
+        "\n"
+        "Run: gitea-pr check-reviews\n"
+        "\n"
+        "If all clear (no open PRs or no unaddressed comments): end immediately.\n"
+        "Cron sessions are lightweight checks — they should complete in seconds.\n"
+        "\n"
+        "If ACTION NEEDED: use the k8s-manifest-builder skill (Phase READ through\n"
+        "Phase REPORT) to address the feedback, then end.\n"
+        "\n"
+        "If the gitea-pr command fails (network error, API timeout): report the\n"
+        "error and end. Do not retry or attempt workarounds."
     )
 
     def main():
