@@ -4785,6 +4785,125 @@ mod tests {
         );
     }
 
+    // ── Regression: serialized wire format must contain image_url, not raw base64 ──
+
+    #[test]
+    fn tool_result_with_image_serializes_as_content_parts_on_wire() {
+        // Build tool messages exactly as the agent loop does:
+        // assistant with tool_calls, then tool with JSON-wrapped content
+        let input = vec![
+            ChatMessage::user("Take a screenshot".to_string()),
+            ChatMessage::assistant(
+                r#"{"content":"Taking screenshot now","tool_calls":[{"id":"call_ss","name":"image_info","arguments":"{}"}]}"#,
+            ),
+            ChatMessage::tool(
+                r#"{"tool_call_id":"call_ss","content":"File: test.png\nSize: 1000 bytes\n[IMAGE:data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ]"}"#,
+            ),
+        ];
+
+        let native = OpenAiCompatibleProvider::convert_messages_for_native(&input, true);
+
+        // Serialize to JSON — this is what goes on the wire to litellm
+        let wire_json = serde_json::to_string(&native).unwrap();
+
+        // The wire format MUST have image_url content parts
+        assert!(
+            wire_json.contains("image_url"),
+            "wire JSON should contain image_url content part, got: {}",
+            &wire_json[..wire_json.len().min(500)]
+        );
+
+        // The wire format must NOT have raw [IMAGE:] markers
+        assert!(
+            !wire_json.contains("[IMAGE:"),
+            "wire JSON should not contain raw [IMAGE:] marker"
+        );
+
+        // The wire format must NOT have raw base64 outside of a url field
+        // (it should be inside {"image_url":{"url":"data:image/..."}})
+        assert!(
+            wire_json.contains(r#""url":"data:image/jpeg;base64,"#),
+            "base64 data should be inside an image_url.url field"
+        );
+    }
+
+    #[test]
+    fn tool_result_with_image_in_orphan_path_serializes_as_content_parts() {
+        // Same test but for the orphan fallback path (tool_call_id doesn't match)
+        let input = vec![
+            ChatMessage::user("Screenshot".to_string()),
+            // No matching assistant tool_call — tool message is orphaned
+            ChatMessage::tool(
+                r#"{"tool_call_id":"orphan_id","content":"Screenshot\n[IMAGE:data:image/png;base64,iVBORw0KGgo]"}"#,
+            ),
+        ];
+
+        let native = OpenAiCompatibleProvider::convert_messages_for_native(&input, true);
+        let wire_json = serde_json::to_string(&native).unwrap();
+
+        assert!(
+            !wire_json.contains("[IMAGE:"),
+            "orphan path wire JSON should not contain raw [IMAGE:] marker"
+        );
+    }
+
+    // ── Property: no message with [IMAGE:] should leak raw markers to wire ──
+
+    #[test]
+    fn no_image_marker_leakage_across_all_roles() {
+        let image_content = "Result\n[IMAGE:data:image/jpeg;base64,/9j/4AAQ]";
+
+        // Test every role that might contain an [IMAGE:] marker
+        let test_cases: Vec<(&str, Vec<ChatMessage>)> = vec![
+            (
+                "user message",
+                vec![ChatMessage::user(image_content.to_string())],
+            ),
+            (
+                "tool message (JSON-wrapped, matched)",
+                vec![
+                    ChatMessage::assistant(
+                        r#"{"content":"","tool_calls":[{"id":"call_1","name":"test","arguments":"{}"}]}"#,
+                    ),
+                    ChatMessage::tool(
+                        &serde_json::json!({
+                            "tool_call_id": "call_1",
+                            "content": image_content
+                        }).to_string(),
+                    ),
+                ],
+            ),
+            (
+                "tool message (JSON-wrapped, orphan)",
+                vec![ChatMessage::tool(
+                    &serde_json::json!({
+                        "tool_call_id": "no_match",
+                        "content": image_content
+                    }).to_string(),
+                )],
+            ),
+            (
+                "tool message (raw string, not JSON)",
+                vec![ChatMessage {
+                    role: "tool".to_string(),
+                    content: image_content.to_string(),
+                }],
+            ),
+        ];
+
+        for (label, messages) in test_cases {
+            let native =
+                OpenAiCompatibleProvider::convert_messages_for_native(&messages, true);
+            let wire_json = serde_json::to_string(&native).unwrap();
+
+            assert!(
+                !wire_json.contains("[IMAGE:"),
+                "image marker leaked in '{label}': {}",
+                &wire_json[..wire_json.len().min(200)]
+            );
+        }
+    }
+
     #[test]
     fn convert_messages_strips_tool_call_tags_from_assistant_content() {
         use crate::providers::ChatMessage;
