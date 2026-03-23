@@ -469,7 +469,7 @@ impl Provider for ReliableProvider {
                                         "Provider call failed, retrying"
                                     );
                                     tokio::time::sleep(Duration::from_millis(wait)).await;
-                                    backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
+                                    backoff_ms = (backoff_ms.saturating_mul(2)).min(30_000);
                                 }
                             }
                         }
@@ -592,7 +592,7 @@ impl Provider for ReliableProvider {
                                         "Provider call failed, retrying"
                                     );
                                     tokio::time::sleep(Duration::from_millis(wait)).await;
-                                    backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
+                                    backoff_ms = (backoff_ms.saturating_mul(2)).min(30_000);
                                 }
                             }
                         }
@@ -723,7 +723,7 @@ impl Provider for ReliableProvider {
                                         "Provider call failed, retrying"
                                     );
                                     tokio::time::sleep(Duration::from_millis(wait)).await;
-                                    backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
+                                    backoff_ms = (backoff_ms.saturating_mul(2)).min(30_000);
                                 }
                             }
                         }
@@ -839,7 +839,7 @@ impl Provider for ReliableProvider {
                                         "Provider call failed, retrying"
                                     );
                                     tokio::time::sleep(Duration::from_millis(wait)).await;
-                                    backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
+                                    backoff_ms = (backoff_ms.saturating_mul(2)).min(30_000);
                                 }
                             }
                         }

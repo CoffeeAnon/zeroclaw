@@ -208,7 +208,9 @@ pub async fn run_wizard_with_migration(
         model_routes: Vec::new(),
         embedding_routes: Vec::new(),
         heartbeat: HeartbeatConfig::default(),
+        recovery: crate::config::RecoveryConfig::default(),
         cron: crate::config::CronConfig::default(),
+        proactive_messaging: crate::config::ProactiveMessagingConfig::default(),
         goal_loop: crate::config::schema::GoalLoopConfig::default(),
         channels_config,
         memory: memory_config, // User-selected memory backend
@@ -234,8 +236,11 @@ pub async fn run_wizard_with_migration(
         query_classification: crate::config::QueryClassificationConfig::default(),
         transcription: crate::config::TranscriptionConfig::default(),
         agents_ipc: crate::config::AgentsIpcConfig::default(),
+        presentation: crate::config::schema::PresentationConfig::default(),
         mcp: crate::config::schema::McpConfig::default(),
         model_support_vision: None,
+        strip_prior_reasoning: false,
+        context_window_tokens: 128_000,
         wasm: crate::config::WasmConfig::default(),
     };
 
@@ -724,7 +729,9 @@ async fn run_quick_setup_with_home(
         model_routes: Vec::new(),
         embedding_routes: Vec::new(),
         heartbeat: HeartbeatConfig::default(),
+        recovery: crate::config::RecoveryConfig::default(),
         cron: crate::config::CronConfig::default(),
+        proactive_messaging: crate::config::ProactiveMessagingConfig::default(),
         goal_loop: crate::config::schema::GoalLoopConfig::default(),
         channels_config: ChannelsConfig::default(),
         memory: memory_config,
@@ -750,8 +757,11 @@ async fn run_quick_setup_with_home(
         query_classification: crate::config::QueryClassificationConfig::default(),
         transcription: crate::config::TranscriptionConfig::default(),
         agents_ipc: crate::config::AgentsIpcConfig::default(),
+        presentation: crate::config::schema::PresentationConfig::default(),
         mcp: crate::config::schema::McpConfig::default(),
         model_support_vision: None,
+        strip_prior_reasoning: false,
+        context_window_tokens: 128_000,
         wasm: crate::config::WasmConfig::default(),
     };
     if no_totp {
@@ -5032,6 +5042,7 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     allowed_from,
                     ignore_attachments,
                     ignore_stories,
+                    edit_messages: false,
                 });
 
                 println!("  {} Signal configured", style("✅").green().bold());
@@ -8807,6 +8818,7 @@ mod tests {
             allowed_from: vec!["*".into()],
             ignore_attachments: false,
             ignore_stories: true,
+            edit_messages: false,
         });
         assert!(has_launchable_channels(&channels));
 

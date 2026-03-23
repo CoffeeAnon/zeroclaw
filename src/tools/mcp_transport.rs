@@ -146,11 +146,12 @@ impl McpTransportConn for StdioTransport {
 
 // ── HTTP Transport ───────────────────────────────────────────────────────
 
-/// HTTP-based transport (POST requests).
+/// HTTP-based transport (POST requests, streamable-http session tracking).
 pub struct HttpTransport {
     url: String,
     client: reqwest::Client,
     headers: std::collections::HashMap<String, String>,
+    /// MCP session ID returned by the server; sent on subsequent requests.
     session_id: Option<String>,
 }
 

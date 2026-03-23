@@ -7,6 +7,7 @@
 //! - Request timeouts (30s) to prevent slow-loris attacks
 //! - Header sanitization (handled by axum/hyper)
 
+pub mod acp_server;
 pub mod api;
 mod openai_compat;
 mod openclaw_compat;
@@ -49,8 +50,9 @@ use uuid::Uuid;
 
 /// Maximum request body size (64KB) — prevents memory exhaustion
 pub const MAX_BODY_SIZE: usize = 65_536;
-/// Request timeout (30s) — prevents slow-loris attacks
-pub const REQUEST_TIMEOUT_SECS: u64 = 30;
+/// Request timeout — prevents slow-loris attacks.
+/// Set high enough for the full agent tool loop (/api/chat, /v1/chat/completions).
+pub const REQUEST_TIMEOUT_SECS: u64 = 300;
 /// Sliding window used by gateway rate limiting.
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 /// Fallback max distinct client keys tracked in gateway rate limiter.
@@ -373,6 +375,8 @@ pub struct AppState {
     pub cost_tracker: Option<Arc<CostTracker>>,
     /// SSE broadcast channel for real-time events
     pub event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    /// ACP session store (None when ACP server is disabled).
+    pub acp_sessions: Option<acp_server::AcpSessionStore>,
 }
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
@@ -795,6 +799,13 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         max_tool_iterations,
         cost_tracker,
         event_tx,
+        acp_sessions: if config.gateway.acp_server.enabled {
+            Some(acp_server::AcpSessionStore::new(
+                config.gateway.acp_server.session_ttl_secs,
+            ))
+        } else {
+            None
+        },
     };
 
     // Config PUT needs larger body limit (1MB)
@@ -814,6 +825,17 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route(
             "/v1/chat/completions",
             post(openclaw_compat::handle_v1_chat_completions_with_tools),
+        )
+        .layer(RequestBodyLimitLayer::new(
+            openai_compat::CHAT_COMPLETIONS_MAX_BODY_SIZE,
+        ));
+
+    // ACP server endpoint needs larger body limit and long timeout (agent loops
+    // can run for many minutes). It gets its own nested router like OpenAI compat.
+    let acp_routes = Router::new()
+        .route(
+            "/acp",
+            post(acp_server::handle_acp).delete(acp_server::handle_acp_delete),
         )
         .layer(RequestBodyLimitLayer::new(
             openai_compat::CHAT_COMPLETIONS_MAX_BODY_SIZE,
@@ -840,6 +862,8 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         // ── OpenAI-compatible endpoints ──
         .route("/v1/models", get(openai_compat::handle_v1_models))
         .merge(openai_compat_routes)
+        // ── ACP server (agent-to-agent communication) ──
+        .merge(acp_routes)
         // ── Web Dashboard API routes ──
         .route("/api/status", get(api::handle_api_status))
         .route("/api/config", get(api::handle_api_config_get))
@@ -2895,8 +2919,8 @@ mod tests {
     }
 
     #[test]
-    fn security_timeout_is_30_seconds() {
-        assert_eq!(REQUEST_TIMEOUT_SECS, 30);
+    fn security_timeout_is_300_seconds() {
+        assert_eq!(REQUEST_TIMEOUT_SECS, 300);
     }
 
     #[test]
@@ -2991,6 +3015,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_metrics(State(state), test_connect_info(), HeaderMap::new())
@@ -3053,6 +3078,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_metrics(State(state), test_connect_info(), HeaderMap::new())
@@ -3098,6 +3124,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_metrics(State(state), test_public_connect_info(), HeaderMap::new())
@@ -3144,6 +3171,7 @@ mod tests {
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let unauthorized =
@@ -3659,6 +3687,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -3733,6 +3762,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_webhook(
@@ -3788,6 +3818,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_webhook(
@@ -3844,6 +3875,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_webhook(
@@ -3909,6 +3941,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_node_control(
@@ -3967,6 +4000,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_node_control(
@@ -4031,6 +4065,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_node_control(
@@ -4089,6 +4124,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let headers = HeaderMap::new();
@@ -4177,6 +4213,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_webhook(
@@ -4235,6 +4272,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -4298,6 +4336,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -4405,6 +4444,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_wati_webhook(State(state), HeaderMap::new(), Bytes::from("{}"))
@@ -4457,6 +4497,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_wati_webhook(State(state), HeaderMap::new(), Bytes::from("{}"))
@@ -4511,6 +4552,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_wati_webhook(State(state), HeaderMap::new(), Bytes::from("{}"))
@@ -4566,6 +4608,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -4628,6 +4671,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -4688,6 +4732,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -4749,6 +4794,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -4810,6 +4856,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -4873,6 +4920,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -4928,6 +4976,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_github_webhook(
@@ -4984,6 +5033,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let body = r#"{
@@ -5051,6 +5101,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let body = r#"{
@@ -5123,6 +5174,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_nextcloud_talk_webhook(
@@ -5185,6 +5237,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -5240,6 +5293,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let response = handle_qq_webhook(
@@ -5294,6 +5348,7 @@ Reminder set successfully."#;
             max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
+            acp_sessions: None,
         };
 
         let mut headers = HeaderMap::new();
