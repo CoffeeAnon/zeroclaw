@@ -2888,19 +2888,7 @@ pub async fn run(
         Some(provider_name),
     );
 
-    let provider_runtime_options = providers::ProviderRuntimeOptions {
-        auth_profile_override: None,
-        provider_api_url: config.api_url.clone(),
-        provider_transport: config.effective_provider_transport(),
-        zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
-        secrets_encrypt: config.secrets.encrypt,
-        reasoning_enabled: config.runtime.reasoning_enabled,
-        reasoning_level: config.effective_provider_reasoning_level(),
-        custom_provider_api_mode: config.provider_api.map(|mode| mode.as_compatible_mode()),
-        custom_provider_supports_responses_fallback: config.supports_responses_fallback,
-        max_tokens_override: None,
-        model_support_vision: config.model_support_vision,
-    };
+    let provider_runtime_options = providers::provider_runtime_options_from_config(&config);
 
     let provider: Box<dyn Provider> = providers::create_routed_provider_with_options(
         provider_name,
@@ -3570,19 +3558,7 @@ pub async fn process_message_with_session(
         config.default_model.as_deref(),
         Some(provider_name),
     );
-    let provider_runtime_options = providers::ProviderRuntimeOptions {
-        auth_profile_override: None,
-        provider_api_url: config.api_url.clone(),
-        provider_transport: config.effective_provider_transport(),
-        zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
-        secrets_encrypt: config.secrets.encrypt,
-        reasoning_enabled: config.runtime.reasoning_enabled,
-        reasoning_level: config.effective_provider_reasoning_level(),
-        custom_provider_api_mode: config.provider_api.map(|mode| mode.as_compatible_mode()),
-        custom_provider_supports_responses_fallback: config.supports_responses_fallback,
-        max_tokens_override: None,
-        model_support_vision: config.model_support_vision,
-    };
+    let provider_runtime_options = providers::provider_runtime_options_from_config(&config);
     let provider: Box<dyn Provider> = providers::create_routed_provider_with_options(
         provider_name,
         config.api_key.as_deref(),
@@ -3811,19 +3787,7 @@ pub async fn process_message_with_history(
         config.default_model.as_deref(),
         Some(provider_name),
     );
-    let provider_runtime_options = providers::ProviderRuntimeOptions {
-        auth_profile_override: None,
-        provider_api_url: config.api_url.clone(),
-        provider_transport: config.effective_provider_transport(),
-        zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
-        secrets_encrypt: config.secrets.encrypt,
-        reasoning_enabled: config.runtime.reasoning_enabled,
-        reasoning_level: config.effective_provider_reasoning_level(),
-        custom_provider_api_mode: config.provider_api.map(|mode| mode.as_compatible_mode()),
-        custom_provider_supports_responses_fallback: config.supports_responses_fallback,
-        max_tokens_override: None,
-        model_support_vision: config.model_support_vision,
-    };
+    let provider_runtime_options = providers::provider_runtime_options_from_config(&config);
     let provider: Box<dyn Provider> = providers::create_routed_provider_with_options(
         provider_name,
         config.api_key.as_deref(),

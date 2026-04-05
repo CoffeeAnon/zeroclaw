@@ -266,6 +266,14 @@ impl OpenAiCompatibleProvider {
         }
     }
 
+    /// Merge all system messages into the first user message before sending.
+    /// Unlike `new_merge_system_into_user`, this preserves native tool calling.
+    pub fn with_merge_system_into_user(mut self) -> Self {
+        self.merge_system_into_user = true;
+        self
+    }
+
+
     /// Collect all `system` role messages, concatenate their content,
     /// and prepend to the first `user` message. Drop all system messages.
     /// Used for providers (e.g. MiniMax) that reject `role: system`.
@@ -754,6 +762,171 @@ struct StreamDelta {
     /// Reasoning/thinking models may stream output via `reasoning_content`.
     #[serde(default)]
     reasoning_content: Option<String>,
+    /// Native tool-calling deltas in OpenAI chat-completions streaming format.
+    #[serde(default)]
+    tool_calls: Option<Vec<StreamToolCallDelta>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamToolCallDelta {
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<StreamFunctionDelta>,
+    // Compatibility: some providers stream name/arguments at top-level.
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct StreamToolCallAccumulator {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
+}
+
+impl StreamToolCallAccumulator {
+    fn apply_delta(&mut self, delta: &StreamToolCallDelta) {
+        if let Some(id) = delta.id.as_ref().filter(|value| !value.is_empty()) {
+            self.id = Some(id.clone());
+        }
+
+        let delta_name = delta
+            .function
+            .as_ref()
+            .and_then(|function| function.name.as_ref())
+            .or(delta.name.as_ref())
+            .filter(|value| !value.is_empty());
+        if let Some(name) = delta_name {
+            self.name = Some(name.clone());
+        }
+
+        if let Some(arguments_delta) = delta
+            .function
+            .as_ref()
+            .and_then(|function| function.arguments.as_ref())
+            .or(delta.arguments.as_ref())
+            .filter(|value| !value.is_empty())
+        {
+            self.arguments.push_str(arguments_delta);
+        }
+    }
+
+    fn into_provider_tool_call(self) -> Option<ProviderToolCall> {
+        let name = self.name?;
+        let arguments = if self.arguments.trim().is_empty() {
+            "{}".to_string()
+        } else {
+            self.arguments
+        };
+        let normalized_arguments = if serde_json::from_str::<serde_json::Value>(&arguments).is_ok()
+        {
+            arguments
+        } else {
+            tracing::warn!(
+                function = %name,
+                arguments = %arguments,
+                "Invalid JSON in streamed native tool-call arguments, using empty object"
+            );
+            "{}".to_string()
+        };
+
+        Some(ProviderToolCall {
+            id: self.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            name,
+            arguments: normalized_arguments,
+        })
+    }
+}
+
+fn parse_sse_chunk(line: &str) -> StreamResult<Option<StreamChunkResponse>> {
+    let line = line.trim();
+
+    if line.is_empty() || line.starts_with(':') {
+        return Ok(None);
+    }
+
+    let Some(data) = line.strip_prefix("data:") else {
+        return Ok(None);
+    };
+    let data = data.trim();
+
+    if data == "[DONE]" {
+        return Ok(None);
+    }
+
+    serde_json::from_str(data)
+        .map(Some)
+        .map_err(StreamError::Json)
+}
+
+/// Parse custom proxy tool events from SSE lines.
+/// These are emitted by proxies like claude-max-api-proxy that execute tools
+/// internally and forward observability events via custom SSE fields.
+fn parse_proxy_tool_event(line: &str) -> Option<StreamEvent> {
+    let data = line.trim().strip_prefix("data:")?.trim();
+    let obj: serde_json::Value = serde_json::from_str(data).ok()?;
+
+    if let Some(ts) = obj.get("x_tool_start") {
+        let Some(name) = ts.get("name").and_then(|v| v.as_str()) else {
+            tracing::debug!("proxy x_tool_start event missing required 'name' field");
+            return None;
+        };
+        let name = name.to_string();
+        let args = ts
+            .get("arguments")
+            .and_then(|v| v.as_str())
+            .unwrap_or("{}")
+            .to_string();
+        return Some(StreamEvent::PreExecutedToolCall { name, args });
+    }
+
+    if let Some(tr) = obj.get("x_tool_result") {
+        let name = tr
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let output = tr
+            .get("output")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return Some(StreamEvent::PreExecutedToolResult { name, output });
+    }
+
+    None
+}
+
+fn extract_sse_text_delta(choice: &StreamChoice) -> Option<String> {
+    if let Some(content) = &choice.delta.content {
+        if !content.is_empty() {
+            return Some(content.clone());
+        }
+    }
+
+    None
+}
+
+fn extract_sse_reasoning_delta(choice: &StreamChoice) -> Option<String> {
+    choice
+        .delta
+        .reasoning_content
+        .as_ref()
+        .filter(|value| !value.is_empty())
+        .cloned()
 }
 
 /// Parse SSE (Server-Sent Events) stream from OpenAI-compatible providers.
@@ -877,6 +1050,162 @@ fn sse_bytes_to_chunks(
     })
     .boxed()
 }
+
+/// Convert SSE byte stream to structured streaming events.
+fn sse_bytes_to_events(
+    response: reqwest::Response,
+    count_tokens: bool,
+) -> stream::BoxStream<'static, StreamResult<StreamEvent>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
+
+    tokio::spawn(async move {
+        let mut buffer = String::new();
+        let mut tool_calls: Vec<StreamToolCallAccumulator> = Vec::new();
+        let mut emitted_tool_calls = false;
+
+        match response.error_for_status_ref() {
+            Ok(_) => {}
+            Err(e) => {
+                let _ = tx.send(Err(StreamError::Http(e))).await;
+                return;
+            }
+        }
+
+        let mut bytes_stream = response.bytes_stream();
+        // Accumulate partial UTF-8 sequences split across chunk boundaries.
+        let mut utf8_buf: Vec<u8> = Vec::new();
+        while let Some(item) = bytes_stream.next().await {
+            match item {
+                Ok(bytes) => {
+                    utf8_buf.extend_from_slice(&bytes);
+                    let text = match std::str::from_utf8(&utf8_buf) {
+                        Ok(s) => {
+                            let owned = s.to_string();
+                            utf8_buf.clear();
+                            owned
+                        }
+                        Err(e) => {
+                            let valid_up_to = e.valid_up_to();
+                            if valid_up_to == 0 && utf8_buf.len() < 4 {
+                                continue;
+                            }
+                            let valid =
+                                String::from_utf8_lossy(&utf8_buf[..valid_up_to]).into_owned();
+                            utf8_buf.drain(..valid_up_to);
+                            valid
+                        }
+                    };
+                    if text.is_empty() {
+                        continue;
+                    }
+
+                    buffer.push_str(&text);
+
+                    while let Some(pos) = buffer.find('\n') {
+                        let line = buffer[..pos].to_string();
+                        buffer.drain(..=pos);
+
+                        // Custom proxy events for pre-executed tool calls
+                        // (e.g. claude-max-api-proxy streaming x_tool_start/x_tool_result)
+                        if let Some(event) = parse_proxy_tool_event(&line) {
+                            if tx.send(Ok(event)).await.is_err() {
+                                return;
+                            }
+                            continue;
+                        }
+
+                        let chunk = match parse_sse_chunk(&line) {
+                            Ok(Some(chunk)) => chunk,
+                            Ok(None) => continue,
+                            Err(e) => {
+                                let _ = tx.send(Err(e)).await;
+                                return;
+                            }
+                        };
+
+                        let mut should_emit_tool_calls = false;
+                        for choice in &chunk.choices {
+                            if let Some(reasoning_delta) = extract_sse_reasoning_delta(choice) {
+                                let reasoning_chunk = StreamChunk::reasoning(reasoning_delta);
+                                if tx
+                                    .send(Ok(StreamEvent::TextDelta(reasoning_chunk)))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            if let Some(text_delta) = extract_sse_text_delta(choice) {
+                                let mut text_chunk = StreamChunk::delta(text_delta);
+                                if count_tokens {
+                                    text_chunk = text_chunk.with_token_estimate();
+                                }
+                                if tx
+                                    .send(Ok(StreamEvent::TextDelta(text_chunk)))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+
+                            if let Some(deltas) = choice.delta.tool_calls.as_ref() {
+                                for delta in deltas {
+                                    let index = delta.index.unwrap_or(tool_calls.len());
+                                    if index >= tool_calls.len() {
+                                        tool_calls.resize_with(index + 1, Default::default);
+                                    }
+                                    if let Some(acc) = tool_calls.get_mut(index) {
+                                        acc.apply_delta(delta);
+                                    }
+                                }
+                            }
+
+                            if choice.finish_reason.as_deref() == Some("tool_calls") {
+                                should_emit_tool_calls = true;
+                            }
+                        }
+
+                        if should_emit_tool_calls && !emitted_tool_calls {
+                            emitted_tool_calls = true;
+                            for tool_call in tool_calls
+                                .drain(..)
+                                .filter_map(StreamToolCallAccumulator::into_provider_tool_call)
+                            {
+                                if tx.send(Ok(StreamEvent::ToolCall(tool_call))).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(StreamError::Http(e))).await;
+                    return;
+                }
+            }
+        }
+
+        if !emitted_tool_calls {
+            for tool_call in tool_calls
+                .drain(..)
+                .filter_map(StreamToolCallAccumulator::into_provider_tool_call)
+            {
+                if tx.send(Ok(StreamEvent::ToolCall(tool_call))).await.is_err() {
+                    return;
+                }
+            }
+        }
+
+        let _ = tx.send(Ok(StreamEvent::Final)).await;
+    });
+
+    stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|event| (event, rx))
+    })
+    .boxed()
+}
+
 
 fn first_nonempty(text: Option<&str>) -> Option<String> {
     text.and_then(|value| {

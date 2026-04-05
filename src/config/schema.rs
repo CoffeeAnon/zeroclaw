@@ -447,6 +447,27 @@ pub struct ModelProviderConfig {
     /// If true, load OpenAI auth material (OPENAI_API_KEY or ~/.codex/auth.json).
     #[serde(default)]
     pub requires_openai_auth: bool,
+    /// Azure OpenAI resource name (e.g. "my-resource" in https://my-resource.openai.azure.com).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure_openai_resource: Option<String>,
+    /// Azure OpenAI deployment name (e.g. "gpt-4o").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure_openai_deployment: Option<String>,
+    /// Azure OpenAI API version (defaults to "2024-08-01-preview").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure_openai_api_version: Option<String>,
+    /// Optional maximum output tokens to send in API requests.
+    /// When set, overrides the provider's default `max_tokens` value.
+    /// Useful for providers like OpenRouter where the platform default (65536)
+    /// may exceed a model's actual limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// When true, all system messages are collected and prepended to the first
+    /// user message instead of being sent with `role: system`. Native tool
+    /// calling is preserved. Useful for local model servers (e.g. llama.cpp)
+    /// whose chat template rejects system messages at non-first positions.
+    #[serde(default)]
+    pub merge_system_into_user: bool,
 }
 
 /// Provider behavior overrides (`[provider]` section).

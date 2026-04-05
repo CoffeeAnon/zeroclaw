@@ -749,6 +749,9 @@ pub struct ProviderRuntimeOptions {
     pub custom_provider_supports_responses_fallback: Option<bool>,
     pub max_tokens_override: Option<u32>,
     pub model_support_vision: Option<bool>,
+    /// When true, system messages are merged into the first user message before
+    /// sending. Propagated from `ModelProviderConfig::merge_system_into_user`.
+    pub merge_system_into_user: bool,
 }
 
 impl Default for ProviderRuntimeOptions {
@@ -765,6 +768,7 @@ impl Default for ProviderRuntimeOptions {
             custom_provider_supports_responses_fallback: None,
             max_tokens_override: None,
             model_support_vision: None,
+            merge_system_into_user: false,
         }
     }
 }
@@ -774,6 +778,27 @@ impl Default for ProviderRuntimeOptions {
 /// Centralises the field mapping so channels, gateway, and tools stay in sync
 /// without duplicating field assignments at every call site.
 pub fn provider_runtime_options_from_config(config: &crate::config::Config) -> ProviderRuntimeOptions {
+    // Resolve merge_system_into_user from the active model provider profile by
+    // matching api_url — apply_named_model_provider_profile() has already run
+    // and rewritten default_provider, but model_providers retains all profiles.
+    let merge_system_into_user = config
+        .api_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .and_then(|active_url| {
+            config.model_providers.values().find(|p| {
+                p.base_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|u| !u.is_empty())
+                    .map(|u| u.trim_end_matches('/'))
+                    == Some(active_url.trim_end_matches('/'))
+            })
+        })
+        .map(|p| p.merge_system_into_user)
+        .unwrap_or(false);
+
     ProviderRuntimeOptions {
         auth_profile_override: None,
         provider_api_url: config.api_url.clone(),
@@ -786,6 +811,7 @@ pub fn provider_runtime_options_from_config(config: &crate::config::Config) -> P
         custom_provider_supports_responses_fallback: config.supports_responses_fallback,
         max_tokens_override: None,
         model_support_vision: config.model_support_vision,
+        merge_system_into_user,
     }
 }
 
@@ -1433,13 +1459,19 @@ fn create_provider_with_url_and_options(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or("llama.cpp");
-            Ok(Box::new(OpenAiCompatibleProvider::new_with_vision(
+            let provider = OpenAiCompatibleProvider::new_with_vision(
                 "llama.cpp",
                 base_url,
                 Some(llama_cpp_key),
                 AuthStyle::Bearer,
                 true,
-            )))
+            );
+            let provider = if options.merge_system_into_user {
+                provider.with_merge_system_into_user()
+            } else {
+                provider
+            };
+            Ok(Box::new(provider))
         }
         "sglang" => {
             let base_url = api_url
@@ -1518,7 +1550,7 @@ fn create_provider_with_url_and_options(
             let supports_responses_fallback = options
                 .custom_provider_supports_responses_fallback
                 .unwrap_or(false);
-            Ok(Box::new(OpenAiCompatibleProvider::new_custom_with_mode(
+            let provider = OpenAiCompatibleProvider::new_custom_with_mode(
                 "Custom",
                 &base_url,
                 key,
@@ -1527,7 +1559,13 @@ fn create_provider_with_url_and_options(
                 api_mode,
                 options.max_tokens_override,
                 supports_responses_fallback,
-            )))
+            );
+            let provider = if options.merge_system_into_user {
+                provider.with_merge_system_into_user()
+            } else {
+                provider
+            };
+            Ok(Box::new(provider))
         }
 
         // ── Anthropic-compatible custom endpoints ───────────
