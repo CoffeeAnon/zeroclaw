@@ -102,7 +102,7 @@ data:
 
       [goal_loop]
       enabled = true
-      interval_minutes = 10
+      interval_minutes = 30
       step_timeout_secs = 120
       max_steps_per_cycle = 3
 
@@ -112,7 +112,7 @@ data:
 
       [channels_config.signal]
       http_url = "http://127.0.0.1:8686"
-      account = "+15873986009"
+      account = "+19038905805"
       allowed_from = ["*"]
       ignore_attachments = false
       ignore_stories = true
@@ -202,6 +202,7 @@ data:
       strip_ansi = true
       show_metadata = true
       overflow_dir = "/tmp/cmd-output"
+      flatten_json_responses = true
 
       [mcp]
       enabled = true
