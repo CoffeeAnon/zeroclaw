@@ -8015,4 +8015,27 @@ Let me check the result."#;
         assert!(!result.contains("<tool_call>"));
         assert!(result.contains("Text"));
     }
+
+    #[test]
+    fn format_reasoning_for_display_wraps_in_blockquote() {
+        let reasoning = "The user wants to know about cron jobs.\nI should call cron_list.";
+        let result = format_reasoning_for_display(reasoning);
+        assert!(result.starts_with("Reasoning:\n"));
+        assert!(result.contains("> The user wants to know about cron jobs."));
+        assert!(result.contains("> I should call cron_list."));
+    }
+
+    #[test]
+    fn format_reasoning_for_display_empty_returns_empty() {
+        assert_eq!(format_reasoning_for_display(""), "");
+        assert_eq!(format_reasoning_for_display("   \n  "), "");
+    }
+
+    #[test]
+    fn format_reasoning_for_display_trims_whitespace() {
+        let reasoning = "\n  Some thinking here.  \n";
+        let result = format_reasoning_for_display(reasoning);
+        assert!(result.starts_with("Reasoning:\n"));
+        assert!(result.contains("> Some thinking here."));
+    }
 }
