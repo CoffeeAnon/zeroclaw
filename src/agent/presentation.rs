@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use crate::tools::ToolSpec;
 pub use crate::config::schema::PresentationConfig;
 
 static OVERFLOW_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -178,6 +179,88 @@ fn format_value(v: &serde_json::Value) -> String {
     }
 }
 
+/// Patterns that indicate behavioral instructions in tool descriptions.
+const BEHAVIORAL_PREFIXES: &[&str] = &[
+    "Use when",
+    "Use this",
+    "Do NOT",
+    "Do not",
+    "Don't",
+    "Never ",
+    "Only use",
+    "Only call",
+    "Designed for",
+    "Check results with",
+];
+
+/// Simplify a tool spec for models that need compact schemas.
+///
+/// Applies four transformations:
+/// 1. Truncate description to first sentence
+/// 2. Strip sentences starting with behavioral instruction patterns
+/// 3. Remove properties not in the `required` array
+/// 4. Truncate parameter descriptions to first sentence
+pub fn simplify_tool_spec(spec: &ToolSpec) -> ToolSpec {
+    ToolSpec {
+        name: spec.name.clone(),
+        description: simplify_description(&spec.description),
+        parameters: simplify_parameters(&spec.parameters),
+    }
+}
+
+fn simplify_description(desc: &str) -> String {
+    let sentence = first_sentence(desc);
+    if BEHAVIORAL_PREFIXES.iter().any(|p| sentence.starts_with(p)) {
+        return sentence;
+    }
+    sentence
+}
+
+fn first_sentence(text: &str) -> String {
+    if let Some(pos) = text.find(". ") {
+        let candidate = &text[..pos + 1];
+        if candidate.ends_with("e.g.") || candidate.ends_with("i.e.") || candidate.ends_with("etc.") {
+            if let Some(next_pos) = text[pos + 2..].find(". ") {
+                return text[..pos + 2 + next_pos + 1].to_string();
+            }
+        }
+        return candidate.to_string();
+    }
+    text.to_string()
+}
+
+fn simplify_parameters(params: &serde_json::Value) -> serde_json::Value {
+    let Some(obj) = params.as_object() else {
+        return params.clone();
+    };
+
+    let mut result = obj.clone();
+
+    let required: Vec<String> = obj
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
+        let mut simplified_props = serde_json::Map::new();
+        for (key, value) in props {
+            if !required.contains(key) {
+                continue;
+            }
+            let mut prop = value.clone();
+            if let Some(desc) = prop.get("description").and_then(|d| d.as_str()) {
+                let short = first_sentence(desc);
+                prop["description"] = serde_json::Value::String(short);
+            }
+            simplified_props.insert(key.clone(), prop);
+        }
+        result.insert("properties".to_string(), serde_json::Value::Object(simplified_props));
+    }
+
+    serde_json::Value::Object(result)
+}
+
 /// Process tool output for LLM consumption.
 ///
 /// Applies four transformations in order:
@@ -234,6 +317,7 @@ pub fn present_for_llm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     // ── ANSI stripping tests ──
 
@@ -553,5 +637,165 @@ mod tests {
         assert!(!result.contains('"'), "output contains quotes: {result}");
         assert!(!result.contains('{'), "output contains open brace: {result}");
         assert!(!result.contains('}'), "output contains close brace: {result}");
+    }
+
+    // ── Tool schema simplification tests ──
+
+    #[test]
+    fn simplify_truncates_description_to_first_sentence() {
+        let spec = ToolSpec {
+            name: "file_read".into(),
+            description: "Read file contents with line numbers. Supports partial reading via offset and limit. Sensitive files are blocked by default.".into(),
+            parameters: json!({"type": "object", "properties": {}, "required": []}),
+        };
+        let result = simplify_tool_spec(&spec);
+        assert_eq!(result.description, "Read file contents with line numbers.");
+    }
+
+    #[test]
+    fn simplify_strips_behavioral_instructions() {
+        let spec = ToolSpec {
+            name: "delegate".into(),
+            description: "Delegate a task to another agent. Use when: a task benefits from a different model. Do NOT call this for simple lookups.".into(),
+            parameters: json!({"type": "object", "properties": {}, "required": []}),
+        };
+        let result = simplify_tool_spec(&spec);
+        assert_eq!(result.description, "Delegate a task to another agent.");
+    }
+
+    #[test]
+    fn simplify_removes_optional_parameters() {
+        let spec = ToolSpec {
+            name: "file_read".into(),
+            description: "Read a file.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file."},
+                    "offset": {"type": "integer", "description": "Starting line number (1-based, default: 1)."},
+                    "limit": {"type": "integer", "description": "Max lines to return (default: all)."}
+                },
+                "required": ["path"]
+            }),
+        };
+        let result = simplify_tool_spec(&spec);
+        let props = result.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("path"));
+        assert!(!props.contains_key("offset"));
+        assert!(!props.contains_key("limit"));
+    }
+
+    #[test]
+    fn simplify_keeps_all_params_when_all_required() {
+        let spec = ToolSpec {
+            name: "memory_store".into(),
+            description: "Store a memory.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Memory key."},
+                    "value": {"type": "string", "description": "Memory value."}
+                },
+                "required": ["key", "value"]
+            }),
+        };
+        let result = simplify_tool_spec(&spec);
+        let props = result.parameters["properties"].as_object().unwrap();
+        assert_eq!(props.len(), 2);
+    }
+
+    #[test]
+    fn simplify_truncates_parameter_descriptions() {
+        let spec = ToolSpec {
+            name: "browser".into(),
+            description: "Control a browser.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "Browser action. Common actions and required params: open(url), get_text(selector), click(selector)."
+                    }
+                },
+                "required": ["action"]
+            }),
+        };
+        let result = simplify_tool_spec(&spec);
+        let desc = result.parameters["properties"]["action"]["description"].as_str().unwrap();
+        assert_eq!(desc, "Browser action.");
+    }
+
+    #[test]
+    fn simplify_preserves_name() {
+        let spec = ToolSpec {
+            name: "shell".into(),
+            description: "Execute a shell command.".into(),
+            parameters: json!({"type": "object", "properties": {}, "required": []}),
+        };
+        let result = simplify_tool_spec(&spec);
+        assert_eq!(result.name, "shell");
+    }
+
+    #[test]
+    fn simplify_handles_description_without_period() {
+        let spec = ToolSpec {
+            name: "cron_list".into(),
+            description: "List all scheduled cron jobs".into(),
+            parameters: json!({"type": "object", "properties": {}, "required": []}),
+        };
+        let result = simplify_tool_spec(&spec);
+        assert_eq!(result.description, "List all scheduled cron jobs");
+    }
+
+    #[test]
+    fn simplify_handles_empty_required_array() {
+        let spec = ToolSpec {
+            name: "test".into(),
+            description: "Test.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+                "required": []
+            }),
+        };
+        let result = simplify_tool_spec(&spec);
+        let props = result.parameters["properties"].as_object().unwrap();
+        assert!(props.is_empty());
+    }
+
+    #[test]
+    fn simplify_handles_no_required_field() {
+        let spec = ToolSpec {
+            name: "test".into(),
+            description: "Test.".into(),
+            parameters: json!({"type": "object", "properties": {"a": {"type": "string"}}}),
+        };
+        let result = simplify_tool_spec(&spec);
+        let props = result.parameters["properties"].as_object().unwrap();
+        assert!(props.is_empty());
+    }
+
+    #[test]
+    fn simplify_preserves_enum_and_type_fields() {
+        let spec = ToolSpec {
+            name: "browser".into(),
+            description: "Browser.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["open", "click", "snapshot"],
+                        "description": "Browser action. Many details here."
+                    }
+                },
+                "required": ["action"]
+            }),
+        };
+        let result = simplify_tool_spec(&spec);
+        let action = &result.parameters["properties"]["action"];
+        assert!(action["enum"].is_array());
+        assert_eq!(action["type"], "string");
+        assert_eq!(action["description"].as_str().unwrap(), "Browser action.");
     }
 }
