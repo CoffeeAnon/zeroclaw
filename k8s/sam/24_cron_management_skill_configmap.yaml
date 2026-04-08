@@ -7,244 +7,64 @@ data:
   cron-management.md: |
     ---
     name: cron-management
-    version: 1.0.0
-    description: >
-      Guides creation, modification, and review of your own cron jobs. Use this
-      skill BEFORE calling cron_add or cron_update — it prevents the classes of
-      bugs that have caused real incidents (stale prompts persisting for weeks,
-      infinite cron loops, memory-only status checks). Also use when reviewing
-      existing crons for hygiene, when Dan asks about your scheduled tasks, or
-      when you notice a cron behaving unexpectedly. Trigger this skill whenever
-      you're about to schedule, automate, or set up any recurring task — even
-      if you don't think of it as "cron management." If the words "every,"
-      "daily," "periodic," "recurring," or "check on this regularly" come up,
-      consult this skill first.
+    version: 2.0.0
+    description: Guides creation, modification, and review of cron jobs. Consult before cron_add or cron_update.
     always: false
     ---
 
     # Cron Management
 
-    Your cron jobs are stored in SQLite on a persistent volume. They survive pod
-    restarts, redeployments, and config changes indefinitely. A bad cron job
-    doesn't just run once — it runs forever until someone notices. That's why
-    getting the prompt right matters more here than anywhere else.
+    Cron jobs persist in SQLite across restarts. A bad cron runs forever until removed.
+    Consult this skill whenever you schedule, automate, or set up any recurring task.
 
-    ## Before Creating a Cron Job
+    ## Before Creating a Cron
 
-    Ask yourself three questions:
-
-    1. **Does this need to be a cron?** If it's a one-time task, just do it
-       now — don't create a cron. "Check on X every so often" = cron.
-       "Check on X" = one-time task. If in doubt, do it once manually first.
-       Only promote to a cron after you've confirmed the pattern repeats.
-
-    2. **What's the right frequency?** Start less frequent than you think.
-       Hourly is aggressive for most things. Daily is usually fine. Remember:
-       each run costs tokens and adds to Dan's potential notification surface.
-       You can always increase frequency later — decreasing it after Dan has
-       been getting hourly pings is harder.
-
-    3. **What should the cron do when there's nothing to report?** The answer
-       is almost always "end immediately and stay silent." If you can't
-       articulate a clear exit condition, the cron isn't well-defined enough
-       — stop and rethink before creating it.
-
-    4. **Should it notify Dan?** Most crons should work silently (delivery
-       mode `none`). Only use `announce` mode or `send_user_message` when the
-       cron's output is genuinely actionable — a decision Dan needs to make,
-       a deadline approaching, a failure that needs attention. Status reports
-       that say "everything is fine" are noise, not signal.
+    1. Is this recurring or one-time? One-time tasks: just do it now, do not create a cron.
+    2. Run cron_list. If you have 3+ agent crons, merge or replace before adding another.
+    3. Default frequency: daily. More frequent than every 3 hours: ask Dan first.
+    4. Define the exit condition: what does "nothing to do" look like? If unclear, rethink.
+    5. Default delivery: none. Only use announce for output Dan needs every run. For conditional notifications, use send_user_message inside the prompt.
 
     ## Writing the Cron Prompt
 
-    The prompt is the most critical part. It runs in an **isolated session** —
-    no conversation history, no memory of what you were just doing. It only
-    sees: the system prompt (AGENTS.md, SOUL.md, TOOLS.md, etc.), MEMORY.md,
-    and the cron prompt itself.
+    The prompt runs in an isolated session with no conversation history.
+    It only sees: system prompt, MEMORY.md, and the cron prompt itself.
 
-    ### Reference skills by name, don't inline instructions
+    Rules for every cron prompt:
+    - Reference skills by name, not inline instructions. Skills update via ConfigMap; inlined logic fossilizes.
+    - Reference entities by role, not name. Names change (Goose became Walter). Roles are stable.
+    - Include an explicit exit condition: "If nothing to report: end immediately. Do not save memory, do not message Dan."
+    - Use live tools (vikunja CLI, acp-client, shell), not just memory_recall. Memory is a cache that goes stale.
+    - Constrain scope. Specify exactly what to check and what to do. Vague prompts cause runaway sessions.
+    - Include "Do not call cron_run — you are already inside the cron job." in every agent prompt.
 
-    Bad — bakes in instructions that will go stale:
-    ```
-    Fetch recordings from https://meetings.coffee-anon.com using this Python
-    script: [120 lines of Python]...
-    ```
+    ## cron_add Parameters
 
-    Good — references the skill, which gets updated via ConfigMap:
-    ```
-    Use the daily-meeting-summary skill to process today's meetings.
-    Follow Steps 1 through 3 from the Cron Job Prompt section.
-    ```
-
-    Skills are synced from ConfigMaps on every pod restart. Cron prompts are
-    not. If you inline the logic, it fossilizes — when the skill gets updated,
-    your cron keeps running the old version.
-
-    ### Reference entities by role, not by name
-
-    Bad — bakes in a name that may change:
-    ```
-    Send the deployment task to Goose via acp-client.
-    ```
-
-    Good — references the role, which is stable:
-    ```
-    Delegate this to the K8s infrastructure agent via acp-client
-    (see the k8s-delegation skill for the current endpoint and protocol).
-    ```
-
-    Names change (Goose → Walter). Roles don't. If your prompt must use a
-    specific name or endpoint, add a note reminding yourself to verify it's
-    current: "Verify agent name in k8s-delegation skill before sending."
-
-    ### Include explicit exit conditions
-
-    Every cron prompt needs a clear "do nothing" path. Without one, the model
-    will find something to do — even if that means inventing work.
-
-    Template:
-    ```
-    [What to check]
-
-    If [nothing-to-do condition]: end immediately. Do not save a memory,
-    do not write a status update, do not message Dan. Silence means
-    everything is on track.
-
-    If [action condition]: [specific, bounded action].
-    ```
-
-    ### Include live verification, not just memory checks
-
-    Memory is a cache that can go stale. If your cron checks project status,
-    it should use live tools:
-
-    ```
-    Check current status using your tools:
-    - Run `vikunja tasks 1` for task system status
-    - Use acp-client for K8s delegation status
-
-    Do not rely solely on memory_recall — verify against live state.
-    ```
-
-    ### Constrain scope explicitly
-
-    The model in an isolated session has full tool access and will use it
-    creatively if the prompt is vague. Be specific about what the cron should
-    and should not do.
-
-    Bad — too much initiative:
-    ```
-    Check on things and handle anything that needs attention.
-    ```
-
-    Good — bounded scope:
-    ```
-    Check for open PRs that need attention.
-    Run: gitea-pr check-reviews
-
-    If all clear: end immediately.
-    If ACTION NEEDED: address the review feedback, then end.
-    If the command fails: report the error and end. Do not retry.
-    ```
-
-    ### Prevent infinite loops
-
-    Agent cron jobs create a new session and run a prompt. If that prompt
-    calls `cron_run`, it creates another session running the same prompt,
-    which calls `cron_run` again... forever.
-
-    Include in every agent cron prompt:
-    ```
-    Do not call cron_run — you are already inside the cron job.
-    ```
-
-    If you suspect a cron is looping (high token spend, repeated identical
-    actions in logs), the immediate fix is `cron_remove <job_id>` to stop
-    the bleeding, then redesign the prompt with tighter scope before
-    recreating it.
-
-    ## Cron Job Parameters Checklist
-
-    When calling `cron_add`, verify each parameter:
-
-    | Parameter | Guidance |
-    |-----------|----------|
-    | **name** | Descriptive, unique. e.g., `speakr-daily-summary`, `vikunja-task-review` |
-    | **schedule** | Start conservative. Daily > hourly. Use `America/Vancouver` or `America/Edmonton` for Dan's timezone |
-    | **job_type** | `agent` for tasks needing LLM reasoning. `shell` for deterministic scripts |
-    | **session_target** | Almost always `isolated`. Use `main` only if the job needs conversation context |
-    | **prompt** | Follow the guidelines above. Read it back as if you've never seen it before — does it make sense without any other context? |
-    | **delivery** | Default to `none`. Use `announce` only for jobs whose output Dan needs to see every run (rare). For conditional notifications, use `send_user_message` inside the prompt logic instead |
+    name: descriptive and unique (speakr-daily-summary, vikunja-task-review).
+    schedule: start conservative, daily over hourly. Timezone: America/Vancouver or America/Edmonton.
+    job_type: agent for LLM reasoning, shell for deterministic scripts.
+    session_target: almost always isolated. Use main only if conversation context is needed.
+    prompt: follow the rules above. Read it back as if you have never seen it — does it make sense alone?
 
     ## Reviewing Existing Crons
 
-    When reviewing crons (daily hygiene or on-demand), check each job against:
+    Check each job: still relevant? Prompt still accurate (names, endpoints, tools)? Frequency appropriate? Has exit condition? Uses live tools not just memory?
+    Remove completed or abandoned crons. Downgrade overly frequent ones.
 
-    1. **Is it still relevant?** Has the task been completed, superseded, or
-       abandoned? If so, `cron_remove` it.
-    2. **Is the prompt still accurate?** Do names, endpoints, tool names, and
-       skill references still match reality? Check the current skills and
-       config — don't trust the prompt's assertions.
-    3. **Is the frequency appropriate?** An hourly job that rarely has anything
-       to report should probably be daily. A daily job for a completed project
-       should be removed.
-    4. **Does it have a clear exit condition?** If not, it's generating
-       unnecessary work and token spend on every run.
-    5. **Does it reference live tools or only memory?** Memory-only crons
-       will drift from reality. Add live verification if missing.
+    ## Modifying a Cron
 
-    ## Modifying a Cron (`cron_update`)
+    Read the current prompt first via cron_list. Make targeted changes. Verify after updating.
 
-    When updating a cron prompt, treat it like editing a deployed config:
-    - Read the current prompt first (`cron_list` shows truncated prompts —
-      you may need to check the full prompt via the cron job details)
-    - Make targeted changes, don't rewrite from scratch unless necessary
-    - After updating, verify the change took effect by reading the prompt back
+    ## Shared Infrastructure
 
-    ## Examples
+    You share a GPU backend (4 parallel slots) with other agents and interactive users.
+    Each agent cron occupies a slot for 30-120 seconds. Multiple crons in the same window cause 429 rate limits and response delays.
+    The scheduler applies 0-14 minute jitter automatically, but avoid scheduling many crons at the same hour.
+    Sub-hourly agent crons almost never make sense. Use shell crons for fast checks instead.
 
-    **Good cron: daily meeting summary**
-    ```
-    name: speakr-daily-summary
-    schedule: 0 12,17 * * 1-5 (America/Vancouver)
-    job_type: agent
-    session_target: isolated
-    prompt: |
-      You are running inside an isolated cron session.
-      Use the daily-meeting-summary skill to process today's meetings.
-      Follow Steps 1 through 3 from the Cron Job Prompt section.
-      Do not call cron_run — you are already inside the cron job.
-    ```
-    Why it works: references skill by name, has clear steps, prevents loop.
+    ## Frequency Guide
 
-    **Good cron: PR review monitor**
-    ```
-    name: pr-review-monitor
-    schedule: */30 * * * * (America/Edmonton)
-    job_type: agent
-    session_target: isolated
-    prompt: |
-      Check for open PRs that need attention.
-      Run: gitea-pr check-reviews
-      If all clear: end immediately.
-      If ACTION NEEDED: use the k8s-manifest-builder skill to address
-      the feedback, then end.
-      If the command fails: report the error and end. Do not retry.
-    ```
-    Why it works: single check, bounded response, explicit failure handling.
-
-    **Bad cron (real incident): stale name**
-    ```
-    prompt: Check on Goose and report the todolist project status to Dan.
-    ```
-    What went wrong: "Goose" was renamed to "Walter" weeks earlier. The cron
-    prompt was never updated. Sam sent daily messages referencing a name that
-    no longer existed, confusing Dan and eroding trust.
-
-    **Bad cron (real incident): unbounded initiative**
-    ```
-    prompt: Review the codebase and fix anything that needs attention.
-    ```
-    What went wrong: The model interpreted "anything" broadly, entered a
-    glob_search loop exploring the entire repo, consumed thousands of tokens,
-    and never terminated. Vague prompts + full tool access = runaway sessions.
+    Daily or twice-daily: summaries, task reviews, hygiene checks. Default choice.
+    Every 3-6 hours: fast-moving state like PR review monitors.
+    More frequent than 3 hours: ask Dan first.
+    Sub-hourly: use a shell cron, not an agent cron.
