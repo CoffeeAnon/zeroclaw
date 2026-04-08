@@ -212,6 +212,14 @@ spec:
               mountPath: /data/.zeroclaw/workspace/skills/daily-meeting-summary/SKILL.md
               subPath: daily-meeting-summary.md
               readOnly: true
+            - name: skill-meeting-summary
+              mountPath: /data/.zeroclaw/workspace/skills/daily-meeting-summary/speakr-fetch.py
+              subPath: speakr-fetch.py
+              readOnly: true
+            - name: skill-meeting-summary
+              mountPath: /data/.zeroclaw/workspace/skills/daily-meeting-summary/speakr-transcript.py
+              subPath: speakr-transcript.py
+              readOnly: true
             - name: skill-science-curator
               mountPath: /data/.zeroclaw/workspace/skills/science-curator/SKILL.md
               subPath: science-curator.md
@@ -279,7 +287,7 @@ spec:
             - name: POLL_TIMEOUT_SECONDS
               value: "20"
             - name: SIGNAL_ACCOUNT
-              value: "+15873986009"
+              value: "+19038905805"
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -304,6 +312,15 @@ spec:
         - name: skill-meeting-summary
           configMap:
             name: zeroclaw-skill-meeting-summary
+            items:
+              - key: daily-meeting-summary.md
+                path: daily-meeting-summary.md
+              - key: speakr-fetch.py
+                path: speakr-fetch.py
+                mode: 0755
+              - key: speakr-transcript.py
+                path: speakr-transcript.py
+                mode: 0755
         - name: skill-science-curator
           configMap:
             name: zeroclaw-skill-science-curator
