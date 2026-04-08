@@ -204,6 +204,7 @@ data:
       overflow_dir = "/tmp/cmd-output"
       flatten_json_responses = true
       simplify_tool_schemas = true
+      show_reasoning = true
 
       [mcp]
       enabled = true
