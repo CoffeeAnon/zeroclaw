@@ -1145,10 +1145,20 @@ pub async fn run_tool_call_loop(
         max_tool_iterations
     };
 
+    let simplify_schemas = TOOL_LOOP_PRESENTATION_CONFIG
+        .try_with(|c| c.simplify_tool_schemas)
+        .unwrap_or(false);
     let tool_specs: Vec<crate::tools::ToolSpec> = tools_registry
         .iter()
         .filter(|tool| !excluded_tools.iter().any(|ex| ex == tool.name()))
-        .map(|tool| tool.spec())
+        .map(|tool| {
+            let spec = tool.spec();
+            if simplify_schemas {
+                crate::agent::presentation::simplify_tool_spec(&spec)
+            } else {
+                spec
+            }
+        })
         .collect();
     let use_native_tools = provider.supports_native_tools() && !tool_specs.is_empty();
     let turn_id = Uuid::new_v4().to_string();
@@ -2572,8 +2582,20 @@ pub async fn run_tool_call_loop(
 /// Build the tool instruction block for the system prompt from concrete tool
 /// specs so the LLM knows how to invoke tools.
 pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> String {
-    let specs: Vec<crate::tools::ToolSpec> =
-        tools_registry.iter().map(|tool| tool.spec()).collect();
+    let simplify = TOOL_LOOP_PRESENTATION_CONFIG
+        .try_with(|c| c.simplify_tool_schemas)
+        .unwrap_or(false);
+    let specs: Vec<crate::tools::ToolSpec> = tools_registry
+        .iter()
+        .map(|tool| {
+            let spec = tool.spec();
+            if simplify {
+                crate::agent::presentation::simplify_tool_spec(&spec)
+            } else {
+                spec
+            }
+        })
+        .collect();
     build_tool_instructions_from_specs(&specs)
 }
 
