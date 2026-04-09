@@ -29,7 +29,9 @@ data:
 
     STEP 1: Run the aggregation script.
     shell: python3 /data/.zeroclaw/workspace/skills/daily-meeting-summary/speakr-fetch.py
-    This writes meetings-YYYY-MM-DD.md. The status line tells you counts and new recordings.
+    This fetches today's meetings plus re-checks the past 3 days for updated annotations.
+    Writes to both wiki/sources/ (raw data layer) and memory/ (exec summary workflow).
+    Watch for "UPDATED sources" in output — means Dan annotated older meeting notes.
 
     STEP 2: Build the executive summary.
     Read meetings-YYYY-MM-DD.md with file_read.
@@ -48,15 +50,21 @@ data:
     memory_store key=meetings_digest_YYYY-MM-DD category=daily value="N meetings. Files: meetings-DATE.md, meetings-exec-DATE.md. Theme: [one sentence]."
 
     STEP 4: Wiki distillation.
-    The aggregation file (meetings-YYYY-MM-DD.md) is raw source data.
-    Copy it to the wiki as immutable source: file_write /data/workspace/wiki/sources/meetings-YYYY-MM-DD.md
-    Then distill key findings into wiki pages:
-    - For each person who committed to an action item: update or create wiki/entities/PERSON.md with what they owe Dan.
-    - For each key decision made: update or create wiki/concepts/DECISION-SLUG.md with context and rationale.
-    - For each new project or initiative mentioned: update or create wiki/entities/PROJECT.md.
-    Only create pages for substantive items. Skip routine status updates with no new information.
+    The script already wrote raw source files to wiki/sources/. These are the raw data layer.
+    Check the script output for two signals:
+    - Today's meetings: always distill these.
+    - "UPDATED sources" line: Dan annotated older meeting notes. Re-distill those too.
+
+    For each source file to distill (today's + any updated):
+    - Read the source file from wiki/sources/meetings-DATE.md.
+    - For each person who committed to an action item: update or create wiki/entities/PERSON.md.
+    - For each key decision made: update or create wiki/concepts/DECISION-SLUG.md.
+    - For each new project or initiative: update or create wiki/entities/PROJECT.md.
+    Only create pages for substantive items. Skip routine updates with no new information.
+    When re-distilling an updated source, check what changed (new annotations, revised summaries)
+    and update the relevant wiki pages with the new context.
     Update wiki/index.md with any new pages. Append to wiki/log.md.
-    Follow the wiki-management skill for page format and cross-reference conventions.
+    Follow the wiki-management skill for page format and cross-references.
     ```
 
     ## On-Demand Usage
@@ -86,17 +94,20 @@ data:
     #!/usr/bin/env python3
     """Fetch and aggregate daily meeting recordings from Speakr.
 
-    Usage: python3 speakr-fetch.py [YYYY-MM-DD]
-    Defaults to today if no date argument is provided.
-    Writes meetings-YYYY-MM-DD.md to /data/workspace/memory/.
+    Usage: python3 speakr-fetch.py [YYYY-MM-DD] [--lookback N]
+    Defaults to today. --lookback N also re-fetches the past N days
+    to detect updated annotations (default: 3).
+
+    Writes to both wiki/sources/ (primary, immutable-ish raw layer)
+    and memory/ (backward compat for exec summary workflow).
+    Reports which source files changed so Sam can re-distill them.
     """
-    import json, os, urllib.request, datetime, pathlib, sys
+    import json, os, urllib.request, datetime, pathlib, sys, hashlib
 
     BASE = 'https://meetings.coffee-anon.com'
     TOKEN = os.environ['SPEAKR_API_TOKEN']
-    TODAY = sys.argv[1] if len(sys.argv) > 1 else datetime.date.today().isoformat()
+    WIKI_SOURCES = '/data/workspace/wiki/sources'
     MEM = '/data/workspace/memory'
-    OUT = f'{MEM}/meetings-{TODAY}.md'
     DROP = {'transcription','transcription_text','summary_html','notes_html',
             'audio_available','audio_deleted_at','can_delete','can_edit',
             'deletion_exempt','file_size','mime_type','original_filename',
@@ -104,38 +115,71 @@ data:
             'is_highlighted','is_inbox','is_owner','is_shared','has_group_tags',
             'user_id','completed_at','created_at'}
 
+    # Parse args
+    dates_to_fetch = []
+    lookback = 3
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == '--lookback' and i + 1 < len(args):
+            lookback = int(args[i + 1])
+            i += 2
+        else:
+            dates_to_fetch.append(args[i])
+            i += 1
+
+    today = datetime.date.today()
+    if not dates_to_fetch:
+        dates_to_fetch.append(today.isoformat())
+
+    # Add lookback days
+    for d in range(1, lookback + 1):
+        past = (today - datetime.timedelta(days=d)).isoformat()
+        if past not in dates_to_fetch:
+            dates_to_fetch.append(past)
+
     def api(path):
         r = urllib.request.Request(f'{BASE}{path}',
             headers={'Authorization': f'Bearer {TOKEN}'})
         return json.loads(urllib.request.urlopen(r).read())
 
-    # Check if an earlier run already wrote this file (noon vs 5pm)
-    previous_titles = set()
-    prev = pathlib.Path(OUT)
-    if prev.exists():
-        for line in prev.read_text().splitlines():
-            if line.startswith('## '):
-                previous_titles.add(line[3:].strip())
+    def file_hash(path):
+        if not path.exists():
+            return None
+        return hashlib.sha256(path.read_bytes()).hexdigest()
 
-    # Fetch list of today's recordings
-    date_query = f'date:{TODAY}' if TODAY != datetime.date.today().isoformat() else 'date:today'
-    data = api(f'/api/recordings?q={date_query}&per_page=100')
-    recs = [r for r in data.get('recordings', []) if r.get('status') == 'COMPLETED']
+    def fetch_date(target_date):
+        """Fetch recordings for a date, write files, return (ok, failed, pending, new, changed)."""
+        wiki_out = pathlib.Path(f'{WIKI_SOURCES}/meetings-{target_date}.md')
+        mem_out = pathlib.Path(f'{MEM}/meetings-{target_date}.md')
+        old_hash = file_hash(wiki_out)
 
-    if not recs:
-        with open(OUT, 'w') as f:
-            f.write(f'# Meetings — {TODAY}\n\nNo completed meeting recordings for today.\n')
-        print(f'No meetings today. Wrote {OUT}')
-        raise SystemExit(0)
+        # Track titles from prior run for new-since-last detection
+        previous_titles = set()
+        if mem_out.exists():
+            for line in mem_out.read_text().splitlines():
+                if line.startswith('## '):
+                    previous_titles.add(line[3:].strip())
 
-    ok = 0
-    failed = 0
-    pending_summaries = 0
-    new_since_last = []
+        is_today = target_date == today.isoformat()
+        date_query = 'date:today' if is_today else f'date:{target_date}'
+        data = api(f'/api/recordings?q={date_query}&per_page=100')
+        recs = [r for r in data.get('recordings', []) if r.get('status') == 'COMPLETED']
 
-    with open(OUT, 'w') as f:
-        f.write(f'# Meetings — {TODAY}\n\n')
-        for i, rec_stub in enumerate(recs):
+        if not recs:
+            if is_today:
+                content = f'# Meetings — {target_date}\n\nNo completed meeting recordings for today.\n'
+                wiki_out.write_text(content)
+                mem_out.write_text(content)
+            return 0, 0, 0, [], old_hash != file_hash(wiki_out)
+
+        ok = 0
+        failed = 0
+        pending_summaries = 0
+        new_since_last = []
+        lines = [f'# Meetings — {target_date}\n\n']
+
+        for idx, rec_stub in enumerate(recs):
             rid = rec_stub['id']
             title = rec_stub.get('title', 'Untitled')
             try:
@@ -143,9 +187,8 @@ data:
                 for k in DROP:
                     rec.pop(k, None)
             except Exception as e:
-                f.write(f'## {title}\n')
-                f.write(f'*Failed to fetch recording {rid}: {e}*\n\n---\n\n')
-                print(f'  [{i+1}/{len(recs)}] FAILED {title}: {e}')
+                lines.append(f'## {title}\n')
+                lines.append(f'*Failed to fetch recording {rid}: {e}*\n\n---\n\n')
                 failed += 1
                 continue
 
@@ -161,52 +204,73 @@ data:
             if title not in previous_titles and previous_titles:
                 new_since_last.append(title)
 
-            f.write(f'## {title}\n')
-            f.write(f'**Participants:** {participants}\n')
-            f.write(f'**Time:** {time_str}\n')
+            lines.append(f'## {title}\n')
+            lines.append(f'**Participants:** {participants}\n')
+            lines.append(f'**Time:** {time_str}\n')
             if tags:
-                f.write(f'**Tags:** {tags}\n')
-            f.write(f'**Transcript:** {BASE}/recording/{rid}\n\n')
+                lines.append(f'**Tags:** {tags}\n')
+            lines.append(f'**Transcript:** {BASE}/recording/{rid}\n\n')
 
             if summary:
-                f.write(f'### Summary\n{summary}\n\n')
+                lines.append(f'### Summary\n{summary}\n\n')
             else:
-                f.write('### Summary\n*Summary pending — recording may still be processing.*\n\n')
+                lines.append('### Summary\n*Summary pending — recording may still be processing.*\n\n')
                 pending_summaries += 1
 
             if events:
-                f.write('### Action Items & Events\n')
+                lines.append('### Action Items & Events\n')
                 for ev in events:
                     ev_title = ev.get('title', 'Untitled')
                     ev_date = ev.get('start_datetime', '')
                     ev_attendees = ', '.join(ev.get('attendees', []))
                     ev_desc = ev.get('description', '')
-                    f.write(f'- **{ev_title}**')
+                    line = f'- **{ev_title}**'
                     if ev_attendees:
-                        f.write(f' ({ev_attendees})')
+                        line += f' ({ev_attendees})'
                     if ev_date:
-                        f.write(f' — {ev_date}')
+                        line += f' — {ev_date}'
                     if ev_desc:
-                        f.write(f': {ev_desc}')
-                    f.write('\n')
-                f.write('\n')
+                        line += f': {ev_desc}'
+                    lines.append(line + '\n')
+                lines.append('\n')
 
             if notes:
-                f.write(f'### Notes\n{notes}\n\n')
+                lines.append(f'### Notes\n{notes}\n\n')
 
-            f.write('---\n\n')
+            lines.append('---\n\n')
             ok += 1
-            print(f'  [{i+1}/{len(recs)}] {title}')
 
-    # Print summary for the agent to relay in Step 2
-    parts = [f'Wrote {ok} meetings to {OUT}']
-    if failed:
-        parts.append(f'{failed} failed to fetch')
-    if pending_summaries:
-        parts.append(f'{pending_summaries} still processing (no summary yet)')
-    if new_since_last:
-        parts.append(f'New since last run: {", ".join(new_since_last)}')
-    print('. '.join(parts))
+        content = ''.join(lines)
+        wiki_out.parent.mkdir(parents=True, exist_ok=True)
+        wiki_out.write_text(content)
+        mem_out.parent.mkdir(parents=True, exist_ok=True)
+        mem_out.write_text(content)
+
+        changed = old_hash != file_hash(wiki_out)
+        return ok, failed, pending_summaries, new_since_last, changed
+
+    # Fetch all dates
+    all_updated = []
+    for target_date in dates_to_fetch:
+        ok, failed, pending, new, changed = fetch_date(target_date)
+        is_primary = target_date == dates_to_fetch[0]
+
+        if is_primary:
+            parts = [f'Wrote {ok} meetings to meetings-{target_date}.md']
+            if failed:
+                parts.append(f'{failed} failed to fetch')
+            if pending:
+                parts.append(f'{pending} still processing')
+            if new:
+                parts.append(f'New since last run: {", ".join(new)}')
+            print('. '.join(parts))
+
+        if changed and not is_primary:
+            all_updated.append(f'meetings-{target_date}.md')
+
+    if all_updated:
+        print(f'UPDATED sources (Dan annotated): {", ".join(all_updated)}')
+        print('Re-distill these in Step 4 — annotations may contain new decisions or action items.')
 
   speakr-transcript.py: |
     #!/usr/bin/env python3
