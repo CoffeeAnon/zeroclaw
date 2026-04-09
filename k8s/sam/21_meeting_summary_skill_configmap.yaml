@@ -7,8 +7,8 @@ data:
   daily-meeting-summary.md: |
     ---
     name: daily-meeting-summary
-    version: 3.0.0
-    description: Fetches and summarizes daily meeting recordings from Speakr
+    version: 3.1.0
+    description: Fetches and summarizes daily meeting recordings from Speakr, distills into wiki
     always: false
     ---
 
@@ -46,6 +46,17 @@ data:
 
     STEP 3: Store memory.
     memory_store key=meetings_digest_YYYY-MM-DD category=daily value="N meetings. Files: meetings-DATE.md, meetings-exec-DATE.md. Theme: [one sentence]."
+
+    STEP 4: Wiki distillation.
+    The aggregation file (meetings-YYYY-MM-DD.md) is raw source data.
+    Copy it to the wiki as immutable source: file_write /data/workspace/wiki/sources/meetings-YYYY-MM-DD.md
+    Then distill key findings into wiki pages:
+    - For each person who committed to an action item: update or create wiki/entities/PERSON.md with what they owe Dan.
+    - For each key decision made: update or create wiki/concepts/DECISION-SLUG.md with context and rationale.
+    - For each new project or initiative mentioned: update or create wiki/entities/PROJECT.md.
+    Only create pages for substantive items. Skip routine status updates with no new information.
+    Update wiki/index.md with any new pages. Append to wiki/log.md.
+    Follow the wiki-management skill for page format and cross-reference conventions.
     ```
 
     ## On-Demand Usage
