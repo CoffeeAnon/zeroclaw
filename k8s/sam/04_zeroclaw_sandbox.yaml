@@ -54,6 +54,7 @@ spec:
               mkdir -p /data/.zeroclaw/workspace/skills/science-curator
               mkdir -p /data/.zeroclaw/workspace/skills/browser-navigation
               mkdir -p /data/.zeroclaw/workspace/skills/cron-management
+              mkdir -p /data/.zeroclaw/workspace/skills/wiki-management
               # Seed Serena project config if missing.
               # This lets activate_project work without auto-detection
               # (which fails on markdown-only workspaces).
@@ -232,6 +233,10 @@ spec:
               mountPath: /data/.zeroclaw/workspace/skills/cron-management/SKILL.md
               subPath: cron-management.md
               readOnly: true
+            - name: skill-wiki-management
+              mountPath: /data/.zeroclaw/workspace/skills/wiki-management/SKILL.md
+              subPath: wiki-management.md
+              readOnly: true
         - name: serena
           image: citizendaniel/zeroclaw-sam:v1.5.1
           imagePullPolicy: IfNotPresent
@@ -330,6 +335,9 @@ spec:
         - name: skill-cron-management
           configMap:
             name: zeroclaw-skill-cron-management
+        - name: skill-wiki-management
+          configMap:
+            name: zeroclaw-skill-wiki-management
         - name: acp-client
           configMap:
             name: acp-client
