@@ -349,6 +349,17 @@ tokio::task_local! {
     static TOOL_LOOP_STRIP_PRIOR_REASONING: bool;
     static TOOL_LOOP_COMPACTION_CONTEXT: Option<ToolLoopCompactionContext>;
     static TOOL_LOOP_PRESENTATION_CONFIG: super::presentation::PresentationConfig;
+    static TOOL_LOOP_TOOL_CHOICE: Option<String>;
+}
+
+/// Read the configured `tool_choice` override from the current task-local scope.
+/// Returns `None` when no override is set (providers should default to `"auto"`).
+/// Used by providers to respect the `[provider] tool_choice` config setting.
+pub fn tool_choice_override() -> Option<String> {
+    TOOL_LOOP_TOOL_CHOICE
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
 }
 
 /// Context needed for LLM-powered compaction inside the tool-call loop.
@@ -1202,6 +1213,10 @@ pub async fn run_tool_call_loop(
         .try_with(Clone::clone)
         .ok()
         .flatten();
+    let tool_choice_override = TOOL_LOOP_TOOL_CHOICE
+        .try_with(Clone::clone)
+        .ok()
+        .flatten();
     let mut progress_tracker = ProgressTracker::default();
     let mut active_model = model.to_string();
     let bypass_non_cli_approval_for_turn =
@@ -1591,6 +1606,7 @@ pub async fn run_tool_call_loop(
             ChatRequest {
                 messages: &request_messages,
                 tools: request_tools,
+                tool_choice: tool_choice_override.clone(),
             },
             active_model.as_str(),
             temperature,
@@ -1680,6 +1696,7 @@ pub async fn run_tool_call_loop(
                         ChatRequest {
                             messages: &continuation_messages,
                             tools: request_tools,
+                            tool_choice: tool_choice_override.clone(),
                         },
                         active_model.as_str(),
                         temperature,
@@ -3124,24 +3141,27 @@ pub async fn run(
                             Some(compact_ctx),
                             TOOL_LOOP_PRESENTATION_CONFIG.scope(
                                 config.presentation.clone(),
-                                run_tool_call_loop(
-                                    provider.as_ref(),
-                                    &mut history,
-                                    &tools_registry,
-                                    observer.as_ref(),
-                                    provider_name,
-                                    &model_name,
-                                    temperature,
-                                    false,
-                                    approval_manager.as_ref(),
-                                channel_name,
-                                &config.multimodal,
-                                config.agent.max_tool_iterations,
-                                None,
-                                None,
-                                effective_hooks,
-                                &[],
-                                None,
+                                TOOL_LOOP_TOOL_CHOICE.scope(
+                                    config.provider.tool_choice.clone(),
+                                    run_tool_call_loop(
+                                        provider.as_ref(),
+                                        &mut history,
+                                        &tools_registry,
+                                        observer.as_ref(),
+                                        provider_name,
+                                        &model_name,
+                                        temperature,
+                                        false,
+                                        approval_manager.as_ref(),
+                                    channel_name,
+                                    &config.multimodal,
+                                    config.agent.max_tool_iterations,
+                                    None,
+                                    None,
+                                    effective_hooks,
+                                    &[],
+                                    None,
+                                    ),
                                 ),
                             ),
                         ),
@@ -3346,24 +3366,27 @@ pub async fn run(
                                 Some(compact_ctx),
                                 TOOL_LOOP_PRESENTATION_CONFIG.scope(
                                     config.presentation.clone(),
-                                    run_tool_call_loop(
-                                        provider.as_ref(),
-                                        &mut history,
-                                        &tools_registry,
-                                        observer.as_ref(),
-                                        provider_name,
-                                        &model_name,
-                                        temperature,
-                                        false,
-                                        approval_manager.as_ref(),
-                                        channel_name,
-                                        &config.multimodal,
-                                        config.agent.max_tool_iterations,
-                                        None,
-                                        None,
-                                        effective_hooks,
-                                        &[],
-                                        None,
+                                    TOOL_LOOP_TOOL_CHOICE.scope(
+                                        config.provider.tool_choice.clone(),
+                                        run_tool_call_loop(
+                                            provider.as_ref(),
+                                            &mut history,
+                                            &tools_registry,
+                                            observer.as_ref(),
+                                            provider_name,
+                                            &model_name,
+                                            temperature,
+                                            false,
+                                            approval_manager.as_ref(),
+                                            channel_name,
+                                            &config.multimodal,
+                                            config.agent.max_tool_iterations,
+                                            None,
+                                            None,
+                                            effective_hooks,
+                                            &[],
+                                            None,
+                                        ),
                                     ),
                                 ),
                             ),

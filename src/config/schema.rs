@@ -449,6 +449,12 @@ pub struct ProviderConfig {
     /// (e.g. OpenAI Codex `/responses` reasoning effort).
     #[serde(default)]
     pub reasoning_level: Option<String>,
+    /// Override the `tool_choice` parameter sent to the model when tools are available.
+    /// Default: `"auto"` (model decides whether to call tools).
+    /// Set to `"required"` for models like Gemma 4 that need guided decoding to
+    /// reliably produce structured tool calls instead of narrating intent.
+    #[serde(default)]
+    pub tool_choice: Option<String>,
     /// Optional transport override for providers that support multiple transports.
     /// Supported values: "auto", "websocket", "sse".
     ///

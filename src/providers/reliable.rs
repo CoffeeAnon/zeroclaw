@@ -764,6 +764,7 @@ impl Provider for ReliableProvider {
                         let req = ChatRequest {
                             messages: request.messages,
                             tools: request.tools,
+                            tool_choice: request.tool_choice.clone(),
                         };
                         match provider.chat(req, sent_model, temperature).await {
                             Ok(resp) => {
@@ -1909,6 +1910,7 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            tool_choice: None,
         };
         let result = provider.chat(request, "test-model", 0.0).await.unwrap();
 
@@ -1945,6 +1947,7 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            tool_choice: None,
         };
         let result = provider.chat(request, "test-model", 0.0).await.unwrap();
 
@@ -2016,6 +2019,7 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            tool_choice: None,
         };
         let err = provider
             .chat(request, "test", 0.0)
@@ -2135,6 +2139,7 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            tool_choice: None,
         };
         let result = provider.chat(request, "claude-opus", 0.0).await.unwrap();
         assert_eq!(result.text.as_deref(), Some("ok from sonnet"));
@@ -2183,6 +2188,7 @@ mod tests {
         let request = ChatRequest {
             messages: &messages,
             tools: None,
+            tool_choice: None,
         };
         let result = provider.chat(request, "test", 0.0).await.unwrap();
         assert_eq!(result.text.as_deref(), Some("from fallback"));

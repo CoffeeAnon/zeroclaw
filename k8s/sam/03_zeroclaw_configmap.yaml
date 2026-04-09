@@ -77,6 +77,9 @@ data:
       non_cli_natural_language_approval_mode = "direct"
       shell_env_passthrough = ["ACP_AUTH_TOKEN", "ACP_BASE_URL", "ACP_CWD", "SPEAKR_API_TOKEN", "VIKUNJA_API_TOKEN", "VIKUNJA_BASE_URL"]
 
+      [provider]
+      tool_choice = "required"
+
       [research]
       trigger = "never"
 

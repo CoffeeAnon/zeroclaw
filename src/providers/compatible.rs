@@ -1546,6 +1546,7 @@ impl OpenAiCompatibleProvider {
                             ProviderChatRequest {
                                 messages,
                                 tools: fallback_tools,
+                                tool_choice: None,
                             },
                             model,
                             temperature,
@@ -2229,7 +2230,10 @@ impl Provider for OpenAiCompatibleProvider {
             tool_choice: if tools.is_empty() {
                 None
             } else {
-                Some("auto".to_string())
+                // Use configured tool_choice if set (e.g. "required" for Gemma 4),
+                // otherwise default to "auto".
+                crate::agent::loop_::tool_choice_override()
+                    .or_else(|| Some("auto".to_string()))
             },
         };
 
@@ -2378,7 +2382,11 @@ impl Provider for OpenAiCompatibleProvider {
             temperature,
             max_tokens: self.effective_max_tokens(),
             stream: Some(false),
-            tool_choice: tools.as_ref().map(|_| "auto".to_string()),
+            tool_choice: if tools.is_some() {
+                request.tool_choice.clone().or_else(|| Some("auto".to_string()))
+            } else {
+                None
+            },
             tools,
         };
 
@@ -3224,6 +3232,7 @@ mod tests {
                 ProviderChatRequest {
                     messages: &messages,
                     tools: Some(&tools),
+                    tool_choice: None,
                 },
                 "test-model",
                 0.2,
@@ -4226,6 +4235,7 @@ mod tests {
                 ProviderChatRequest {
                     messages: &messages,
                     tools: Some(&tools),
+                    tool_choice: None,
                 },
                 "test-model",
                 0.7,
@@ -4393,6 +4403,7 @@ mod tests {
                 ProviderChatRequest {
                     messages: &messages,
                     tools: Some(&tools),
+                    tool_choice: None,
                 },
                 "test-model",
                 0.7,
