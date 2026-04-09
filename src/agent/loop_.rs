@@ -352,14 +352,16 @@ tokio::task_local! {
     static TOOL_LOOP_TOOL_CHOICE: Option<String>;
 }
 
-/// Read the configured `tool_choice` override from the current task-local scope.
+/// Read the configured `tool_choice` override.
+/// Checks the task-local scope first (set by channel message handlers),
+/// then falls back to the `ZEROCLAW_TOOL_CHOICE` env var (for CLI/cron paths).
 /// Returns `None` when no override is set (providers should default to `"auto"`).
-/// Used by providers to respect the `[provider] tool_choice` config setting.
 pub fn tool_choice_override() -> Option<String> {
     TOOL_LOOP_TOOL_CHOICE
         .try_with(Clone::clone)
         .ok()
         .flatten()
+        .or_else(|| std::env::var("ZEROCLAW_TOOL_CHOICE").ok())
 }
 
 /// Context needed for LLM-powered compaction inside the tool-call loop.
