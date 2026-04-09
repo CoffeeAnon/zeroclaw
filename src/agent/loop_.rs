@@ -324,7 +324,7 @@ const AUTO_CRON_DELIVERY_CHANNELS: &[&str] = &[
 
 const NON_CLI_APPROVAL_WAIT_TIMEOUT_SECS: u64 = 300;
 const NON_CLI_APPROVAL_POLL_INTERVAL_MS: u64 = 250;
-const MISSING_TOOL_CALL_RETRY_PROMPT: &str = "Internal correction: your last reply indicated you were about to take an action, but no valid tool call was emitted. If a tool is needed, emit it now using the required <tool_call>...</tool_call> format. If no tool is needed, provide the complete final answer now and do not defer action.";
+const MISSING_TOOL_CALL_RETRY_PROMPT: &str = "Your last reply described an action but did not call a tool. Use your tools directly — do not narrate what you would do. If a tool is needed, call it now. If no tool is needed, provide the final answer.";
 
 #[derive(Debug, Clone)]
 pub(crate) struct NonCliApprovalPrompt {
