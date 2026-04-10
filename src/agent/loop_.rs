@@ -1094,27 +1094,27 @@ pub(crate) async fn run_tool_call_loop_with_non_cli_approval_context(
                                 TOOL_LOOP_REPLY_TARGET.scope(
                                     reply_target,
                                     run_tool_call_loop(
-                                provider,
-                                history,
-                                tools_registry,
-                                observer,
-                                provider_name,
-                                model,
-                                temperature,
-                                silent,
-                                approval,
-                                channel_name,
-                                multimodal_config,
-                                max_tool_iterations,
-                                cancellation_token,
-                                on_delta,
-                                hooks,
-                                excluded_tools,
-                                injection_rx,
+                                        provider,
+                                        history,
+                                        tools_registry,
+                                        observer,
+                                        provider_name,
+                                        model,
+                                        temperature,
+                                        silent,
+                                        approval,
+                                        channel_name,
+                                        multimodal_config,
+                                        max_tool_iterations,
+                                        cancellation_token,
+                                        on_delta,
+                                        hooks,
+                                        excluded_tools,
+                                        injection_rx,
+                                    ),
+                                ),
                             ),
                         ),
-                    ),
-                    ),
                     ),
                 ),
             ),
@@ -1185,7 +1185,7 @@ pub async fn run_tool_call_loop(
         .map(|tool| {
             let spec = tool.spec();
             if simplify_schemas {
-                crate::agent::presentation::simplify_tool_spec(&spec)
+                crate::agent::presentation::simplify_tool_spec_by_name(&spec)
             } else {
                 spec
             }
@@ -1894,8 +1894,7 @@ pub async fn run_tool_call_loop(
                 // Sanitize response_text before storing in history: strip malformed
                 // <tool_call> tags that the parser couldn't parse. These raw tags
                 // corrupt llama-server's Jinja chat template on subsequent requests.
-                let sanitized_text =
-                    parsing::strip_unparsed_tool_call_tags(&response_text);
+                let sanitized_text = parsing::strip_unparsed_tool_call_tags(&response_text);
                 let assistant_history_content = if native_calls.is_empty() {
                     if use_native_tools {
                         build_native_assistant_history_from_parsed_calls(
@@ -2545,10 +2544,7 @@ pub async fn run_tool_call_loop(
         if let Some(rx) = injection_rx.as_mut() {
             let mut injected_count = 0u32;
             while let Ok(msg) = rx.try_recv() {
-                let content = format!(
-                    "[Mid-turn message from user]\n{}",
-                    msg.content
-                );
+                let content = format!("[Mid-turn message from user]\n{}", msg.content);
                 history.push(ChatMessage::user(content));
                 injected_count += 1;
             }
@@ -2647,7 +2643,7 @@ pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> Strin
         .map(|tool| {
             let spec = tool.spec();
             if simplify {
-                crate::agent::presentation::simplify_tool_spec(&spec)
+                crate::agent::presentation::simplify_tool_spec_by_name(&spec)
             } else {
                 spec
             }
@@ -3153,14 +3149,14 @@ pub async fn run(
                                         temperature,
                                         false,
                                         approval_manager.as_ref(),
-                                    channel_name,
-                                    &config.multimodal,
-                                    config.agent.max_tool_iterations,
-                                    None,
-                                    None,
-                                    effective_hooks,
-                                    &[],
-                                    None,
+                                        channel_name,
+                                        &config.multimodal,
+                                        config.agent.max_tool_iterations,
+                                        None,
+                                        None,
+                                        effective_hooks,
+                                        &[],
+                                        None,
                                     ),
                                 ),
                             ),
@@ -3223,13 +3219,17 @@ pub async fn run(
                     println!("Available commands:");
                     println!("  /help        Show this help message");
                     println!("  /checkpoint  Save conversation snapshot to persistent memory");
-                    println!("  /private     Toggle private mode (disables auto-save and memory tools)");
+                    println!(
+                        "  /private     Toggle private mode (disables auto-save and memory tools)"
+                    );
                     println!("  /clear /new  Clear conversation history");
                     println!("  /quit /exit  Exit interactive mode\n");
                     continue;
                 }
                 "/private" => {
-                    println!("Private mode is only available on channel sessions (Signal, Slack, etc.).");
+                    println!(
+                        "Private mode is only available on channel sessions (Signal, Slack, etc.)."
+                    );
                     println!("Interactive CLI mode does not auto-save to memory.\n");
                     continue;
                 }
@@ -3966,12 +3966,7 @@ pub async fn process_message_with_history(
     if config.memory.auto_save && result.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS {
         let assistant_key = autosave_memory_key("assistant_resp");
         let _ = mem
-            .store(
-                &assistant_key,
-                &result,
-                MemoryCategory::Conversation,
-                None,
-            )
+            .store(&assistant_key, &result, MemoryCategory::Conversation, None)
             .await;
     }
 
@@ -4010,7 +4005,9 @@ mod tests {
     fn should_skip_autosave_allows_normal_messages() {
         assert!(!should_skip_autosave("What meetings did I have today?"));
         assert!(!should_skip_autosave("Check the /api/v1/users endpoint"));
-        assert!(!should_skip_autosave("/models set openai — and then check status"));
+        assert!(!should_skip_autosave(
+            "/models set openai — and then check status"
+        ));
     }
 
     #[test]
@@ -7707,9 +7704,7 @@ Let me check the result."#;
         // Verify the injected message appears in history between tool results and final response
         let injected = history
             .iter()
-            .find(|msg| {
-                msg.role == "user" && msg.content.contains("hey, also check the logs")
-            })
+            .find(|msg| msg.role == "user" && msg.content.contains("hey, also check the logs"))
             .expect("injected message should be present in history");
         assert!(
             injected.content.contains("[Mid-turn message from user]"),
@@ -7964,11 +7959,7 @@ Let me check the result."#;
         let sanitized = parsing::strip_unparsed_tool_call_tags(response_text);
         assert!(!sanitized.contains("<tool_call>"));
 
-        let native = build_native_assistant_history_from_parsed_calls(
-            &sanitized,
-            &calls,
-            None,
-        );
+        let native = build_native_assistant_history_from_parsed_calls(&sanitized, &calls, None);
         // With empty calls, returns Some with empty tool_calls array
         let history = native.expect("returns Some even with empty calls");
 
@@ -7984,8 +7975,14 @@ Let me check the result."#;
     fn strip_unparsed_tool_call_tags_removes_empty_tags() {
         let input = "Let me check.\n<tool_call>\n</tool_call>\nDone.";
         let result = parsing::strip_unparsed_tool_call_tags(input);
-        assert!(!result.contains("<tool_call>"), "empty tag should be stripped");
-        assert!(result.contains("Let me check."), "surrounding text preserved");
+        assert!(
+            !result.contains("<tool_call>"),
+            "empty tag should be stripped"
+        );
+        assert!(
+            result.contains("Let me check."),
+            "surrounding text preserved"
+        );
         assert!(result.contains("Done."), "surrounding text preserved");
     }
 

@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::tools::ToolSpec;
 pub use crate::config::schema::PresentationConfig;
+use crate::tools::ToolSpec;
 
 static OVERFLOW_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -112,18 +112,17 @@ pub fn flatten_json_output(output: &str) -> String {
         serde_json::Value::Object(map) if map.is_empty() => "(empty)".to_string(),
         serde_json::Value::Object(map) => flatten_object(map, "", 0),
         serde_json::Value::Array(arr) if arr.is_empty() => "(empty list)".to_string(),
-        serde_json::Value::Array(arr) => {
-            arr.iter()
-                .enumerate()
-                .map(|(i, v)| match v {
-                    serde_json::Value::Object(map) => {
-                        format!("[{i}] {}", flatten_object(map, "", 0))
-                    }
-                    other => format!("[{i}] {}", format_value(other)),
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .enumerate()
+            .map(|(i, v)| match v {
+                serde_json::Value::Object(map) => {
+                    format!("[{i}] {}", flatten_object(map, "", 0))
+                }
+                other => format!("[{i}] {}", format_value(other)),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
         other => format_value(other),
     }
 }
@@ -208,6 +207,85 @@ pub fn simplify_tool_spec(spec: &ToolSpec) -> ToolSpec {
     }
 }
 
+/// Simplified schema for the browser tool.
+///
+/// `simplify_tool_spec` strips all non-required params, but the browser tool
+/// uses a single dispatch pattern: only `action` is required, while params like
+/// `url`, `selector`, `value`, etc. are action-dependent. Without these, Gemma 4
+/// cannot call the browser tool correctly. This schema keeps the essential params
+/// with short descriptions and drops computer-use-only and snapshot-tuning params.
+fn browser_simplified_params() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["action"],
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["open", "snapshot", "click", "fill", "type", "get_text",
+                         "get_title", "get_url", "screenshot", "wait", "press",
+                         "hover", "scroll", "is_visible", "close", "find"],
+                "description": "Action: open(url), snapshot(), click(selector), fill(selector,value), type(selector,text), get_text(selector), get_title(), get_url(), screenshot(), wait(ms), press(key), hover(selector), scroll(direction), is_visible(selector), close(), find(by,value,find_action)."
+            },
+            "url": {
+                "type": "string",
+                "description": "URL to open."
+            },
+            "selector": {
+                "type": "string",
+                "description": "Element selector: @e1 ref, CSS (#id/.class), or text=..."
+            },
+            "value": {
+                "type": "string",
+                "description": "Value to fill or search for."
+            },
+            "text": {
+                "type": "string",
+                "description": "Text to type or wait for."
+            },
+            "key": {
+                "type": "string",
+                "description": "Key to press (Enter, Tab, Escape, etc.)"
+            },
+            "ms": {
+                "type": "integer",
+                "description": "Milliseconds to wait."
+            },
+            "direction": {
+                "type": "string",
+                "enum": ["up", "down", "left", "right"],
+                "description": "Scroll direction."
+            },
+            "pixels": {
+                "type": "integer",
+                "description": "Pixels to scroll."
+            },
+            "by": {
+                "type": "string",
+                "enum": ["role", "text", "label", "placeholder", "testid"],
+                "description": "Semantic locator type for find."
+            },
+            "find_action": {
+                "type": "string",
+                "enum": ["click", "fill", "text", "hover", "check"],
+                "description": "Action to perform on found element."
+            }
+        }
+    })
+}
+
+/// Simplify a tool spec, with special handling for tools that use dispatch patterns
+/// where action-dependent parameters are not in the `required` array.
+pub fn simplify_tool_spec_by_name(spec: &ToolSpec) -> ToolSpec {
+    if spec.name == "browser" {
+        return ToolSpec {
+            name: spec.name.clone(),
+            description: simplify_description(&spec.description),
+            parameters: browser_simplified_params(),
+        };
+    }
+    simplify_tool_spec(spec)
+}
+
 fn simplify_description(desc: &str) -> String {
     let sentence = first_sentence(desc);
     if BEHAVIORAL_PREFIXES.iter().any(|p| sentence.starts_with(p)) {
@@ -219,7 +297,8 @@ fn simplify_description(desc: &str) -> String {
 fn first_sentence(text: &str) -> String {
     if let Some(pos) = text.find(". ") {
         let candidate = &text[..pos + 1];
-        if candidate.ends_with("e.g.") || candidate.ends_with("i.e.") || candidate.ends_with("etc.") {
+        if candidate.ends_with("e.g.") || candidate.ends_with("i.e.") || candidate.ends_with("etc.")
+        {
             if let Some(next_pos) = text[pos + 2..].find(". ") {
                 return text[..pos + 2 + next_pos + 1].to_string();
             }
@@ -239,7 +318,11 @@ fn simplify_parameters(params: &serde_json::Value) -> serde_json::Value {
     let required: Vec<String> = obj
         .get("required")
         .and_then(|r| r.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
@@ -255,7 +338,10 @@ fn simplify_parameters(params: &serde_json::Value) -> serde_json::Value {
             }
             simplified_props.insert(key.clone(), prop);
         }
-        result.insert("properties".to_string(), serde_json::Value::Object(simplified_props));
+        result.insert(
+            "properties".to_string(),
+            serde_json::Value::Object(simplified_props),
+        );
     }
 
     serde_json::Value::Object(result)
@@ -439,8 +525,7 @@ mod tests {
     #[test]
     fn present_for_llm_shell_uses_exit_codes() {
         let config = PresentationConfig::default();
-        let result =
-            present_for_llm("hello", "shell", true, Duration::from_millis(42), &config);
+        let result = present_for_llm("hello", "shell", true, Duration::from_millis(42), &config);
         assert!(result.ends_with("[exit:0 | 42ms]"));
     }
 
@@ -484,8 +569,7 @@ mod tests {
             show_metadata: false,
             ..Default::default()
         };
-        let result =
-            present_for_llm("hello", "shell", true, Duration::from_millis(42), &config);
+        let result = present_for_llm("hello", "shell", true, Duration::from_millis(42), &config);
         assert_eq!(result, "hello");
     }
 
@@ -497,8 +581,7 @@ mod tests {
             ..Default::default()
         };
         let input = "\x1b[31mline1\x1b[0m\nline2\nline3";
-        let result =
-            present_for_llm(input, "shell", true, Duration::from_millis(10), &config);
+        let result = present_for_llm(input, "shell", true, Duration::from_millis(10), &config);
         assert!(result.contains("line1")); // ANSI stripped
         assert!(!result.contains("\x1b")); // no raw escapes
         assert!(result.contains("truncated")); // overflow triggered
@@ -509,7 +592,8 @@ mod tests {
 
     #[test]
     fn flatten_json_simple_object() {
-        let input = r#"{"name": "speakr-daily-summary", "schedule": "0 12 * * *", "enabled": true}"#;
+        let input =
+            r#"{"name": "speakr-daily-summary", "schedule": "0 12 * * *", "enabled": true}"#;
         let result = flatten_json_output(input);
         assert!(result.contains("name=speakr-daily-summary"));
         assert!(result.contains("schedule=0 12 * * *"));
@@ -578,9 +662,18 @@ mod tests {
         ];
         for input in inputs {
             let result = flatten_json_output(input);
-            assert!(!result.contains('{'), "contains {{ for: {input}\ngot: {result}");
-            assert!(!result.contains('}'), "contains }} for: {input}\ngot: {result}");
-            assert!(!result.contains('"'), "contains \" for: {input}\ngot: {result}");
+            assert!(
+                !result.contains('{'),
+                "contains {{ for: {input}\ngot: {result}"
+            );
+            assert!(
+                !result.contains('}'),
+                "contains }} for: {input}\ngot: {result}"
+            );
+            assert!(
+                !result.contains('"'),
+                "contains \" for: {input}\ngot: {result}"
+            );
         }
     }
 
@@ -591,7 +684,13 @@ mod tests {
             ..Default::default()
         };
         let json_input = r#"{"status": "ok", "count": 5}"#;
-        let result = present_for_llm(json_input, "cron_list", true, Duration::from_millis(10), &config);
+        let result = present_for_llm(
+            json_input,
+            "cron_list",
+            true,
+            Duration::from_millis(10),
+            &config,
+        );
         assert!(result.contains("status=ok"));
         assert!(result.contains("count=5"));
         assert!(!result.contains(r#""status""#));
@@ -601,7 +700,13 @@ mod tests {
     fn present_for_llm_skips_flatten_when_disabled() {
         let config = PresentationConfig::default();
         let json_input = r#"{"status": "ok", "count": 5}"#;
-        let result = present_for_llm(json_input, "cron_list", true, Duration::from_millis(10), &config);
+        let result = present_for_llm(
+            json_input,
+            "cron_list",
+            true,
+            Duration::from_millis(10),
+            &config,
+        );
         assert!(result.contains(r#""status""#));
     }
 
@@ -635,8 +740,14 @@ mod tests {
         assert!(lines[1].contains("[1]"));
         assert!(lines[1].contains("name=morning-project-status"));
         assert!(!result.contains('"'), "output contains quotes: {result}");
-        assert!(!result.contains('{'), "output contains open brace: {result}");
-        assert!(!result.contains('}'), "output contains close brace: {result}");
+        assert!(
+            !result.contains('{'),
+            "output contains open brace: {result}"
+        );
+        assert!(
+            !result.contains('}'),
+            "output contains close brace: {result}"
+        );
     }
 
     // ── Tool schema simplification tests ──
@@ -721,7 +832,9 @@ mod tests {
             }),
         };
         let result = simplify_tool_spec(&spec);
-        let desc = result.parameters["properties"]["action"]["description"].as_str().unwrap();
+        let desc = result.parameters["properties"]["action"]["description"]
+            .as_str()
+            .unwrap();
         assert_eq!(desc, "Browser action.");
     }
 
@@ -830,7 +943,10 @@ mod tests {
         let props = result.parameters["properties"].as_object().unwrap();
         assert_eq!(props.len(), 1);
         assert!(props.contains_key("path"));
-        assert_eq!(props["path"]["description"].as_str().unwrap(), "Path to the file.");
+        assert_eq!(
+            props["path"]["description"].as_str().unwrap(),
+            "Path to the file."
+        );
     }
 
     #[test]
@@ -861,7 +977,74 @@ mod tests {
         assert_eq!(props.len(), 1);
         assert!(props.contains_key("action"));
         assert!(props["action"]["enum"].is_array());
-        assert_eq!(props["action"]["description"].as_str().unwrap(), "Browser action.");
+        assert_eq!(
+            props["action"]["description"].as_str().unwrap(),
+            "Browser action."
+        );
+    }
+
+    #[test]
+    fn simplify_browser_by_name_preserves_action_dependent_params() {
+        // Browser uses action-dispatch: only `action` is required, but url/selector/value etc.
+        // are essential for Gemma 4 to call it correctly. simplify_tool_spec_by_name must
+        // preserve these rather than stripping them.
+        let spec = ToolSpec {
+            name: "browser".into(),
+            description: "Web/browser automation with pluggable backends.".into(),
+            parameters: json!({
+                "type": "object",
+                "required": ["action"],
+                "properties": {
+                    "action": {"type": "string", "enum": ["open", "snapshot"]},
+                    "url": {"type": "string"},
+                    "selector": {"type": "string"},
+                    "value": {"type": "string"},
+                    "x": {"type": "integer", "description": "Screen X coordinate (computer_use)"}
+                }
+            }),
+        };
+        let result = simplify_tool_spec_by_name(&spec);
+        let props = result.parameters["properties"].as_object().unwrap();
+        // Key params must be present
+        assert!(props.contains_key("action"), "action must be kept");
+        assert!(
+            props.contains_key("url"),
+            "url must be kept for open action"
+        );
+        assert!(
+            props.contains_key("selector"),
+            "selector must be kept for click/fill"
+        );
+        assert!(props.contains_key("value"), "value must be kept for fill");
+        // computer_use-only params must be dropped
+        assert!(
+            !props.contains_key("x"),
+            "computer_use coord x must be dropped"
+        );
+    }
+
+    #[test]
+    fn simplify_non_browser_by_name_uses_standard_simplification() {
+        // Non-browser tools should use the standard simplify_tool_spec behavior
+        let spec = ToolSpec {
+            name: "shell".into(),
+            description: "Execute a shell command. Returns stdout and stderr.".into(),
+            parameters: json!({
+                "type": "object",
+                "required": ["command"],
+                "properties": {
+                    "command": {"type": "string", "description": "Command to run."},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds."}
+                }
+            }),
+        };
+        let result = simplify_tool_spec_by_name(&spec);
+        let props = result.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("command"), "required param must be kept");
+        assert!(
+            !props.contains_key("timeout"),
+            "optional param must be stripped"
+        );
     }
 
     #[test]
@@ -872,6 +1055,9 @@ mod tests {
             parameters: json!({"type": "object", "properties": {"tool": {"type": "string", "description": "Tool name."}}, "required": ["tool"]}),
         };
         let result = simplify_tool_spec(&spec);
-        assert_eq!(result.description, "Execute a tool in the background and return a job ID immediately.");
+        assert_eq!(
+            result.description,
+            "Execute a tool in the background and return a job ID immediately."
+        );
     }
 }
