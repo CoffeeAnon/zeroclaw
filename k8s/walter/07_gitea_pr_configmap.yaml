@@ -342,3 +342,98 @@ data:
 
     if __name__ == "__main__":
         main()
+  pr-review-gate.py: |
+    #!/usr/bin/env python3
+    """Shell gate for pr-review-monitor cron.
+
+    Runs `gitea-pr check-reviews` (pure API call, no LLM). If review
+    feedback needs attention, inserts a one-shot agent job into the cron
+    SQLite store so the scheduler picks it up on the next tick (~5 s).
+    If all clear, exits silently — zero LLM traffic.
+    """
+    import os
+    import sqlite3
+    import subprocess
+    import sys
+    import uuid
+    from datetime import datetime, timezone
+
+    DB_PATH = "/data/.zeroclaw/workspace/cron/jobs.db"
+    ONE_SHOT_NAME = "pr-review-act"
+
+    AGENT_PROMPT = """\
+    PR review feedback detected. Address it now.
+
+    gitea-pr check-reviews output:
+    {output}
+
+    Use the k8s-manifest-builder skill (Phase READ through Phase REPORT) to \
+    address the feedback, then end.
+
+    If the gitea-pr command fails (network error, API timeout): report the \
+    error and end. Do not retry or attempt workarounds.\
+    """
+
+
+    def main():
+        try:
+            result = subprocess.run(
+                ["gitea-pr", "check-reviews"],
+                capture_output=True, text=True, timeout=30,
+            )
+            output = (result.stdout + result.stderr).strip()
+        except subprocess.TimeoutExpired:
+            print("gitea-pr check-reviews timed out")
+            sys.exit(1)
+        except FileNotFoundError:
+            print("gitea-pr not found on PATH")
+            sys.exit(1)
+
+        if result.returncode != 0:
+            print(f"gitea-pr check-reviews failed (exit {result.returncode}): {output}")
+            sys.exit(1)
+
+        print(output)
+
+        if "ACTION NEEDED" not in output:
+            return
+
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        conn = sqlite3.connect(DB_PATH)
+
+        # Skip if a one-shot is already pending.
+        existing = conn.execute(
+            "SELECT 1 FROM cron_jobs WHERE name = ? AND enabled = 1",
+            (ONE_SHOT_NAME,),
+        ).fetchone()
+        if existing:
+            print(f"One-shot '{ONE_SHOT_NAME}' already pending, skipping")
+            conn.close()
+            return
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        schedule_json = '{"kind":"at","at":"' + now + '"}'
+        prompt = AGENT_PROMPT.format(output=output)
+
+        conn.execute(
+            "INSERT INTO cron_jobs "
+            "(id, expression, command, schedule, job_type, prompt, name, "
+            "session_target, enabled, delivery, delete_after_run, created_at, next_run) "
+            "VALUES (?, '', '', ?, 'agent', ?, ?, 'isolated', 1, ?, 1, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                schedule_json,
+                prompt,
+                ONE_SHOT_NAME,
+                '{"mode":"none"}',
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        print(f"Spawned one-shot agent job '{ONE_SHOT_NAME}'")
+
+
+    if __name__ == "__main__":
+        main()

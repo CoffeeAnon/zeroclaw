@@ -20,20 +20,7 @@ data:
     CRON_NAME = "pr-review-monitor"
     CRON_EXPR = "*/30 * * * *"
     SCHEDULE_JSON = '{"kind":"cron","expr":"0 */30 * * * *","tz":"America/Edmonton"}'
-    PROMPT = (
-        "Check for open PRs that need attention.\n"
-        "\n"
-        "Run: gitea-pr check-reviews\n"
-        "\n"
-        "If all clear (no open PRs or no unaddressed comments): end immediately.\n"
-        "Cron sessions are lightweight checks — they should complete in seconds.\n"
-        "\n"
-        "If ACTION NEEDED: use the k8s-manifest-builder skill (Phase READ through\n"
-        "Phase REPORT) to address the feedback, then end.\n"
-        "\n"
-        "If the gitea-pr command fails (network error, API timeout): report the\n"
-        "error and end. Do not retry or attempt workarounds."
-    )
+    COMMAND = "pr-review-gate"
 
     def main():
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -46,23 +33,30 @@ data:
             delete_after_run INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
             next_run TEXT NOT NULL, last_run TEXT, last_status TEXT, last_output TEXT)""")
 
-        exists = conn.execute(
-            "SELECT 1 FROM cron_jobs WHERE name=?", (CRON_NAME,)
+        row = conn.execute(
+            "SELECT id, job_type FROM cron_jobs WHERE name=?", (CRON_NAME,)
         ).fetchone()
 
-        if not exists:
+        if row is None:
             now = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "INSERT INTO cron_jobs "
-                "(id,expression,command,schedule,job_type,prompt,name,"
+                "(id,expression,command,schedule,job_type,name,"
                 "session_target,enabled,delivery,delete_after_run,created_at,next_run) "
-                "VALUES (?,?,?,?,?,?,?,?,1,?,0,?,?)",
-                (str(uuid.uuid4()), CRON_EXPR, "", SCHEDULE_JSON, "agent",
-                 PROMPT, CRON_NAME, "isolated", '{"mode":"none"}', now, now))
+                "VALUES (?,?,?,?,?,?,?,1,?,0,?,?)",
+                (str(uuid.uuid4()), CRON_EXPR, COMMAND, SCHEDULE_JSON, "shell",
+                 CRON_NAME, "isolated", '{"mode":"none"}', now, now))
             conn.commit()
-            print(f"Seeded {CRON_NAME} cron job")
+            print(f"Seeded {CRON_NAME} cron job (shell)")
+        elif row[1] != "shell":
+            # Migrate: old agent-type job → shell gate.
+            conn.execute(
+                "UPDATE cron_jobs SET job_type='shell', command=?, prompt=NULL "
+                "WHERE id=?", (COMMAND, row[0]))
+            conn.commit()
+            print(f"Migrated {CRON_NAME} from agent to shell gate")
         else:
-            print(f"{CRON_NAME} cron job already exists")
+            print(f"{CRON_NAME} cron job already exists (shell)")
 
         conn.close()
 
