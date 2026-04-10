@@ -33,6 +33,7 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
         runAsNonRoot: false
         seccompProfile:
           type: RuntimeDefault
@@ -103,6 +104,11 @@ spec:
                 echo "Installing gitea-pr tool"
                 cp /etc/zeroclaw-template/gitea-pr/gitea-pr.py /data/bin/gitea-pr
                 chmod +x /data/bin/gitea-pr
+              fi
+              if [ -f /etc/zeroclaw-template/gitea-pr/pr-review-gate.py ]; then
+                echo "Installing pr-review-gate tool"
+                cp /etc/zeroclaw-template/gitea-pr/pr-review-gate.py /data/bin/pr-review-gate
+                chmod +x /data/bin/pr-review-gate
               fi
               # Copy cron seed script (executed by zeroclaw container on startup).
               if [ -f /etc/zeroclaw-template/cron-seed/seed-cron.py ]; then
