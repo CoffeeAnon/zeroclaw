@@ -7,7 +7,7 @@ data:
   daily-meeting-summary.md: |
     ---
     name: daily-meeting-summary
-    version: 4.0.0
+    version: 4.1.0
     description: >
       Process Dan's Speakr meeting recordings into an executive summary,
       Vikunja tasks, a memory digest, and wiki distillations. Use whenever
@@ -41,6 +41,29 @@ data:
     meeting and wiki content. `workspace_only = false` in the security
     policy is what makes absolute paths reachable — relative paths still
     join against cwd and will land in the wrong tree.
+
+    ## Context hygiene: do not re-read
+
+    If you already read a file in this turn via `file_read` or
+    `shell: cat`, do not re-read it. Its content is still in your
+    context from the earlier tool result. Each unnecessary re-read:
+
+    - Doubles the file's tokens in your request body.
+    - Pushes total prompt size past the point where Gemma 4 inference
+      time exceeds the provider's HTTP timeout, turning a working tool
+      loop into a cascade of `error sending request for url` failures
+      and wasted retries.
+    - Almost always returns the exact same content — a meeting file
+      written by `speakr-fetch.py` in step 1 does not change in the
+      seconds between two tool calls.
+
+    If you genuinely need to re-examine a file — for example, to
+    verify an earlier read was not truncated — use `file_read` with
+    explicit `offset` and `limit` to pull only the slice you need,
+    rather than re-loading the whole thing. And first ask yourself
+    whether the content you already have is actually sufficient to
+    make progress: most of the time it is, and the urge to re-read
+    is a confidence gap, not a real missing-data problem.
 
     ## Bootstrap (first run on a new Sam deployment)
 
@@ -267,6 +290,13 @@ data:
       certainly used a relative path. Re-read the "Why paths are always
       absolute" section and retry with the full `/data/workspace/...`
       path.
+    - Provider calls start failing mid-turn with
+      `error sending request for url` and exponential retry backoff →
+      your context has grown too big for the backend to finish within
+      the provider's HTTP timeout. Re-read the "Context hygiene" section
+      above: you are probably re-reading the same meeting file multiple
+      times in one turn. Stop, use the content you already have, and
+      finish the summary from memory rather than fetching again.
 
   speakr-fetch.py: |
     #!/usr/bin/env python3

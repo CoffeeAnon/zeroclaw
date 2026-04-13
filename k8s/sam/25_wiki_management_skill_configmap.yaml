@@ -7,7 +7,7 @@ data:
   wiki-management.md: |
     ---
     name: wiki-management
-    version: 2.0.0
+    version: 2.1.0
     description: >
       Maintain a structured markdown wiki as your primary knowledge store.
       Use whenever you learn something worth keeping, ingest a document or
@@ -46,6 +46,30 @@ data:
     `workspace_only = false` in the security policy is what makes
     absolute paths reachable — relative paths still join against cwd and
     land in the wrong tree.
+
+    ## Context hygiene: do not re-read
+
+    If you already read a wiki page in this turn via `file_read` or
+    `shell: cat`, do not re-read it. Its content is still in your
+    context from the earlier tool result. Each unnecessary re-read:
+
+    - Doubles the page's tokens in your request body.
+    - Pushes total prompt size past the point where Gemma 4 inference
+      time exceeds the provider's HTTP timeout, turning a working tool
+      loop into a cascade of `error sending request for url` failures
+      and wasted retries.
+    - Almost always returns the exact same content — wiki pages do not
+      change in the seconds between two tool calls unless *you* just
+      wrote to them, in which case you already know what the new
+      content is.
+
+    If you genuinely need to re-examine a page — for example, after a
+    `file_edit` and you want to confirm the new section is where you
+    expected — use `file_read` with explicit `offset` and `limit` to
+    pull only the slice you care about. First ask yourself whether the
+    content you already have is sufficient to make progress: most of
+    the time it is, and the urge to re-read is a confidence gap, not
+    a real missing-data problem.
 
     ## Directory structure
 
@@ -371,3 +395,10 @@ data:
     - `send_user_message` fails during Lint → fall back to writing a
       summary into `/data/workspace/wiki/log.md` so the lint result
       isn't lost, then surface on the next interactive turn.
+    - Provider calls start failing mid-turn with
+      `error sending request for url` and exponential retry backoff →
+      your context has grown too big for the backend to finish within
+      the provider's HTTP timeout. Re-read the "Context hygiene" section
+      above: you are probably re-reading the same wiki page multiple
+      times in one turn. Stop, use the content you already have, and
+      finish the operation from memory rather than fetching again.
