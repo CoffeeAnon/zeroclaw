@@ -910,6 +910,15 @@ pub struct PresentationConfig {
     /// Default: false.
     #[serde(default)]
     pub show_reasoning: bool,
+
+    /// When the model returns native tool calls alongside a content string
+    /// that is just a JSON-shaped description of those same calls, drop the
+    /// content string before display and before writing to history. Breaks
+    /// the feedback loop where a model (notably Gemma 4 under multi-step
+    /// reasoning load) mirrors the `tools[]` schema it sees in its input
+    /// by emitting a pseudo tool-call JSON in the text channel. Default: true.
+    #[serde(default = "default_true")]
+    pub strip_tool_call_echo: bool,
 }
 
 impl Default for PresentationConfig {
@@ -923,6 +932,7 @@ impl Default for PresentationConfig {
             flatten_json_responses: false,
             simplify_tool_schemas: false,
             show_reasoning: false,
+            strip_tool_call_echo: default_true(),
         }
     }
 }

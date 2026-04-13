@@ -1925,6 +1925,37 @@ pub async fn run_tool_call_loop(
                     }),
                 );
 
+                // Tool-call echo scrub. Gemma 4 under multi-step reasoning load
+                // sometimes renders a plan in the text channel by mirroring the
+                // tools[] schema it sees in its input, producing output like
+                // `{"response": "tool_call", "tools": [...]}` alongside the real
+                // native tool_calls. When native calls are present the echo is
+                // zero-signal, and leaving it in history teaches the next turn
+                // to repeat the pattern.
+                let strip_echo = TOOL_LOOP_PRESENTATION_CONFIG
+                    .try_with(|c| c.strip_tool_call_echo)
+                    .unwrap_or(true);
+                if strip_echo
+                    && !native_calls.is_empty()
+                    && crate::agent::presentation::is_tool_call_echo_text(&response_text)
+                {
+                    runtime_trace::record_event(
+                        "tool_call_echo_scrubbed",
+                        Some(channel_name),
+                        Some(provider_name),
+                        Some(active_model.as_str()),
+                        Some(&turn_id),
+                        Some(true),
+                        None,
+                        serde_json::json!({
+                            "iteration": iteration + 1,
+                            "scrubbed_chars": response_text.len(),
+                            "native_tool_calls": native_calls.len(),
+                        }),
+                    );
+                    response_text.clear();
+                }
+
                 // Preserve native tool call IDs in assistant history so role=tool
                 // follow-up messages can reference the exact call id.
                 //

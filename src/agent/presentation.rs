@@ -347,6 +347,92 @@ fn simplify_parameters(params: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(result)
 }
 
+/// Detect a "tool-call echo": assistant text that is really a JSON-shaped
+/// description of a tool call the model is about to make natively.
+///
+/// Gemma 4 under multi-step reasoning load sometimes renders a plan in the
+/// text channel by mirroring the `tools[]` schema it sees in its input, e.g.:
+///
+/// ```text
+/// {"response": "tool_call", "tools": [{"name": "read_file", "parameters": {"path": "..."}}]}
+/// ```
+///
+/// or
+///
+/// ```text
+/// {"tool_calls": [{"name": "shell", "arguments": {"command": "ls"}}]}
+/// ```
+///
+/// When native tool calls arrive alongside such text, the text is zero-signal
+/// — the real tool call fully describes what ran. Dropping it prevents the
+/// echo from polluting history, which in turn prevents the next turn from
+/// seeing its own pattern and mimicking it.
+///
+/// The detector is intentionally strict: it only returns `true` when the
+/// **entire** trimmed text parses as JSON and has tool-call-shaped keys at
+/// the top or one level down. Mixed content ("Here's the plan: {...}") is
+/// left alone.
+pub fn is_tool_call_echo_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return false;
+    };
+    json_value_is_tool_call_shaped(&value)
+}
+
+fn json_value_is_tool_call_shaped(value: &serde_json::Value) -> bool {
+    // A bare list of tool-call objects: [{"name": "...", "parameters": {...}}, ...]
+    if let Some(arr) = value.as_array() {
+        return !arr.is_empty() && arr.iter().all(json_value_looks_like_single_tool_call);
+    }
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    // Top-level shapes we've seen in the wild:
+    //   {"tool_calls": [...]}
+    //   {"tools": [...]}
+    //   {"response": "tool_call", "tools": [...]}  (Gemma 4 pseudo-wire)
+    //   {"name": "...", "parameters": {...}}
+    //   {"function": {"name": "...", "arguments": {...}}}
+    for key in ["tool_calls", "tools"] {
+        if let Some(inner) = obj.get(key).and_then(|v| v.as_array()) {
+            if !inner.is_empty() && inner.iter().all(json_value_looks_like_single_tool_call) {
+                return true;
+            }
+        }
+    }
+    if json_value_looks_like_single_tool_call(value) {
+        return true;
+    }
+    false
+}
+
+fn json_value_looks_like_single_tool_call(value: &serde_json::Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    // {"function": {"name": ...}} — OpenAI wire shape
+    if let Some(function) = obj.get("function").and_then(|v| v.as_object()) {
+        if function
+            .get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+        {
+            return true;
+        }
+    }
+    // {"name": "...", "parameters"|"arguments": ...}
+    let has_name = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    let has_args = obj.contains_key("parameters") || obj.contains_key("arguments");
+    has_name && has_args
+}
+
 /// Process tool output for LLM consumption.
 ///
 /// Applies four transformations in order:
@@ -1059,5 +1145,73 @@ mod tests {
             result.description,
             "Execute a tool in the background and return a job ID immediately."
         );
+    }
+
+    // ── Tool-call echo detection tests ──
+
+    #[test]
+    fn echo_detects_gemma4_pseudo_wire_shape() {
+        let text = r#"{"response": "tool_call", "tools": [{"name": "read_file", "parameters": {"path": "/data/inbox.md"}}]}"#;
+        assert!(is_tool_call_echo_text(text));
+    }
+
+    #[test]
+    fn echo_detects_bare_tool_calls_array() {
+        let text = r#"{"tool_calls": [{"name": "shell", "arguments": {"command": "ls"}}]}"#;
+        assert!(is_tool_call_echo_text(text));
+    }
+
+    #[test]
+    fn echo_detects_openai_function_shape() {
+        let text = r#"{"function": {"name": "file_write", "arguments": "{\"path\":\"/tmp/x\"}"}}"#;
+        assert!(is_tool_call_echo_text(text));
+    }
+
+    #[test]
+    fn echo_detects_single_top_level_call() {
+        let text = r#"{"name": "read_file", "parameters": {"path": "/data/inbox.md"}}"#;
+        assert!(is_tool_call_echo_text(text));
+    }
+
+    #[test]
+    fn echo_detects_bare_array_of_calls() {
+        let text = r#"[{"name": "read_file", "parameters": {"path": "/a"}}, {"name": "read_file", "parameters": {"path": "/b"}}]"#;
+        assert!(is_tool_call_echo_text(text));
+    }
+
+    #[test]
+    fn echo_ignores_natural_language() {
+        let text = "I will read the file and then update it with priorities.";
+        assert!(!is_tool_call_echo_text(text));
+    }
+
+    #[test]
+    fn echo_ignores_mixed_content_with_json() {
+        let text = r#"Here is my plan: {"name": "read_file", "parameters": {"path": "/x"}}"#;
+        assert!(!is_tool_call_echo_text(text));
+    }
+
+    #[test]
+    fn echo_ignores_regular_json_data() {
+        let text = r#"{"status": "ok", "count": 42}"#;
+        assert!(!is_tool_call_echo_text(text));
+    }
+
+    #[test]
+    fn echo_ignores_empty_string() {
+        assert!(!is_tool_call_echo_text(""));
+        assert!(!is_tool_call_echo_text("   \n  "));
+    }
+
+    #[test]
+    fn echo_ignores_empty_tool_calls_array() {
+        let text = r#"{"tool_calls": []}"#;
+        assert!(!is_tool_call_echo_text(text));
+    }
+
+    #[test]
+    fn echo_ignores_name_without_args() {
+        let text = r#"{"name": "read_file"}"#;
+        assert!(!is_tool_call_echo_text(text));
     }
 }
