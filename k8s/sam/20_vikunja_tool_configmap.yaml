@@ -241,29 +241,55 @@ data:
         print(f"Project #{result.get('id', '?')} created: {result.get('title', title)}")
 
 
+    def _print_task_line(t):
+        """Render one task as a single-line list entry."""
+        tid = t.get("id", "?")
+        title = t.get("title", "Untitled")
+        done = "DONE" if t.get("done") else "TODO"
+        due = t.get("due_date", "")
+        due_str = f" (due: {due[:10]})" if due and due != "0001-01-01T00:00:00Z" else ""
+        priority = t.get("priority", 0)
+        pri_str = f" [P{priority}]" if priority else ""
+        labels = t.get("labels") or []
+        label_str = (" {" + ",".join(l.get("title", "?") for l in labels) + "}") if labels else ""
+        assignees = t.get("assignees") or []
+        assign_str = f" @{','.join(a.get('username','?') for a in assignees)}" if assignees else ""
+        print(f"  #{tid} [{done}]{pri_str} {title}{due_str}{label_str}{assign_str}")
+
     def cmd_tasks(args):
         """List tasks in a project."""
         _check_help(args, "tasks")
-        if not args:
-            print("Usage: vikunja tasks <project-id>", file=sys.stderr)
+        flags, positional = _parse_args(args, {"sort": "str", "format": "str"})
+        if not positional:
+            print_command_help("tasks")
             sys.exit(1)
-        project_id = args[0]
+        project_id = positional[0]
         view_id = _get_list_view_id(project_id)
         task_list = _api("GET", f"/projects/{project_id}/views/{view_id}/tasks")
         if not task_list:
             print(f"No tasks in project #{project_id}.")
             return
+
+        sort_by = flags.get("sort", "position")
+        if sort_by == "priority":
+            # Highest priority first; tasks with no priority (0) sink to the bottom.
+            task_list.sort(key=lambda t: -(t.get("priority") or 0))
+        elif sort_by == "due":
+            # Earliest due first; tasks with no due date sink to the bottom.
+            def _due_key(t):
+                d = t.get("due_date") or ""
+                if not d or d == "0001-01-01T00:00:00Z":
+                    return "9999-99-99"
+                return d
+            task_list.sort(key=_due_key)
+        # "position" is the native order returned by the API; no-op.
+
+        if flags.get("format") == "json":
+            print(json.dumps(task_list, indent=2))
+            return
+
         for t in task_list:
-            tid = t.get("id", "?")
-            title = t.get("title", "Untitled")
-            done = "DONE" if t.get("done") else "TODO"
-            due = t.get("due_date", "")
-            due_str = f" (due: {due[:10]})" if due and due != "0001-01-01T00:00:00Z" else ""
-            priority = t.get("priority", 0)
-            pri_str = f" [P{priority}]" if priority else ""
-            assignees = t.get("assignees") or []
-            assign_str = f" @{','.join(a.get('username','?') for a in assignees)}" if assignees else ""
-            print(f"  #{tid} [{done}]{pri_str} {title}{due_str}{assign_str}")
+            _print_task_line(t)
 
 
     def _resolve_user_id(username):
