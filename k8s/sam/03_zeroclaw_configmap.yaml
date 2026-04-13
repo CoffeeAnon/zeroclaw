@@ -62,21 +62,6 @@ data:
           "switch_provider",
           "openclaw_migration",
           "schedule",
-          # Serena duplicates of native zeroclaw tools
-          "serena__execute_shell_command",
-          "serena__search_for_pattern",
-          "serena__read_file",
-          "serena__find_file",
-          "serena__list_dir",
-          "serena__create_text_file",
-          # Serena lifecycle/admin tools
-          "serena__check_onboarding_performed",
-          "serena__onboarding",
-          "serena__initial_instructions",
-          "serena__prepare_for_new_conversation",
-          "serena__get_current_config",
-          "serena__switch_modes",
-          "serena__activate_project",
       ]
       non_cli_natural_language_approval_mode = "direct"
       shell_env_passthrough = ["ACP_AUTH_TOKEN", "ACP_BASE_URL", "ACP_CWD", "SPEAKR_API_TOKEN", "VIKUNJA_API_TOKEN", "VIKUNJA_BASE_URL"]
@@ -213,10 +198,4 @@ data:
       show_reasoning = true
 
       [mcp]
-      enabled = true
-
-      [[mcp.servers]]
-      name = "serena"
-      transport = "http"
-      url = "http://127.0.0.1:9121/mcp"
-      tool_timeout_secs = 60
+      enabled = false

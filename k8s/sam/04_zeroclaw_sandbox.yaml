@@ -56,14 +56,6 @@ spec:
               mkdir -p /data/.zeroclaw/workspace/skills/browser-navigation
               mkdir -p /data/.zeroclaw/workspace/skills/cron-management
               mkdir -p /data/.zeroclaw/workspace/skills/wiki-management
-              # Seed Serena project config if missing.
-              # This lets activate_project work without auto-detection
-              # (which fails on markdown-only workspaces).
-              mkdir -p /data/workspace/.serena
-              echo "Syncing .serena/project.yml"
-              printf '%s\n' 'project_name: sam' 'languages:' '  - bash' '  - toml' '  - yaml' \
-                > /data/workspace/.serena/project.yml
-              chown 1000:1000 /data/workspace/.serena /data/workspace/.serena/project.yml
           securityContext:
             runAsUser: 0
             runAsGroup: 0
@@ -124,13 +116,6 @@ spec:
                   sleep 3
                 done
               fi
-              # Wait for Serena MCP sidecar to be ready.
-              echo "Waiting for Serena MCP server on port 9121..."
-              for _i in $(seq 1 60); do
-                if (echo > /dev/tcp/127.0.0.1/9121) 2>/dev/null; then echo "Serena ready." && break; fi
-                sleep 1
-              done
-              (echo > /dev/tcp/127.0.0.1/9121) 2>/dev/null || echo "Warning: Serena not ready, starting zeroclaw anyway"
               exec zeroclaw daemon
           ports:
             - name: http
@@ -176,10 +161,6 @@ spec:
                   name: zeroclaw-k8s-agent-secrets
                   key: gateway-paired-tokens
                   optional: true
-            - name: SERENA_SESSION_FILE
-              value: /data/.zeroclaw/serena-session-id
-            - name: SERENA_DEFAULT_PROJECT
-              value: /data/workspace
           securityContext:
             runAsUser: 0
             runAsGroup: 0
@@ -255,46 +236,6 @@ spec:
               mountPath: /data/.zeroclaw/workspace/skills/wiki-management/SKILL.md
               subPath: wiki-management.md
               readOnly: true
-        - name: serena
-          image: citizendaniel/zeroclaw-sam:v1.5.13
-          imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - -ec
-            - |
-              mkdir -p /data/workspace
-              cd /data/workspace
-              exec /opt/sam-tools/home/.local/bin/serena start-mcp-server \
-                --transport streamable-http \
-                --port 9121 \
-                --enable-web-dashboard false \
-                --enable-gui-log-window false \
-                --project /data/workspace
-          ports:
-            - name: serena-mcp
-              containerPort: 9121
-              protocol: TCP
-          env:
-            - name: HOME
-              value: /opt/sam-tools/home
-            - name: UV_TOOL_DIR
-              value: /opt/sam-tools/home/.local/share/uv/tools
-          securityContext:
-            runAsUser: 1000
-            runAsGroup: 1000
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-          resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              memory: 1Gi
-          volumeMounts:
-            - name: zeroclaw-data
-              mountPath: /data
         - name: signal-api-adapter
           image: citizendaniel/signal-api-adapter:v1.3.0
           imagePullPolicy: Always
