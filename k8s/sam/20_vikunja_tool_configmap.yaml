@@ -8,18 +8,37 @@ data:
     #!/usr/bin/env python3
     """Vikunja CLI for Sam (ZeroClaw Agent).
 
-    Manages projects and tasks on the Vikunja instance at todolist.coffee-anon.com
-    for project status tracking and coordination.
+    Manages projects, tasks, and labels on the Vikunja instance at
+    todolist.coffee-anon.com for project status tracking and coordination.
 
     Commands:
-      vikunja projects                        List all projects
-      vikunja project create --title "..."    Create a project
-      vikunja tasks <project-id>              List tasks in a project
-      vikunja task create <project-id> --title "..." [--description "..."] [--due "YYYY-MM-DD"] [--priority 1-5] [--assignee <username>]
-      vikunja task update <task-id> [--done] [--title "..."] [--description "..."] [--assignee <username>]
+      vikunja projects                              List all projects
+      vikunja project create --title "..."          Create a project
+
+      vikunja tasks <project-id> [--sort FIELD] [--format FORMAT]
+                                                    List tasks in a project
+      vikunja tasks reorder <project-id> --order "id1,id2,id3"
+                                                    Resequence a project: listed IDs move to the
+                                                    top in order, unlisted tasks follow in their
+                                                    current order
+
+      vikunja task create <project-id> --title "..." [--description ...] [--due YYYY-MM-DD] [--priority 1-5] [--assignee user]
+      vikunja task update <task-id> [--done] [--title ...] [--description ...] [--due ...] [--priority 1-5] [--assignee user]
+      vikunja task show   <task-id>                 Full task detail (description, labels, assignees, comments)
+      vikunja task delete <task-id>                 Delete a task (use for duplicates)
       vikunja task assign <task-id> --user <username>
       vikunja task comment <task-id> --body "..."
-      vikunja help
+
+      vikunja task label <task-id> --list
+      vikunja task label <task-id> --add "name" [--create-missing] [--color ff0000]
+      vikunja task label <task-id> --remove "name"
+
+      vikunja labels [--search "..."]               List all labels
+      vikunja label create --title "..." [--color "ff0000"] [--description "..."]
+
+      vikunja help                                  Top-level help
+      vikunja help <command>                        Per-command help
+      vikunja <command> --help                      Same (works on any subcommand)
 
     Environment:
       VIKUNJA_API_TOKEN  — JWT token for the sam user (required)
