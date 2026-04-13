@@ -59,7 +59,7 @@
 - Modify: `src/agent/loop_.rs`
 - Test: `src/agent/loop_.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add focused tests around `run_tool_call_loop` request assembly:
 
@@ -77,7 +77,7 @@ Minimum assertions:
 - the request contains the screenshot-bearing multimodal `user` message
 - no later message in that same request contains `[Safety Heartbeat`
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -87,7 +87,7 @@ cargo test screenshot_followup_request_skips_safety_heartbeat
 
 Expected: FAIL because `run_tool_call_loop` currently appends the heartbeat unconditionally.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 In `src/agent/loop_.rs`, add a helper near the existing heartbeat helpers:
 
@@ -110,7 +110,7 @@ if let Some(ref hb) = heartbeat_config {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run:
 
@@ -120,7 +120,7 @@ cargo test screenshot_followup_request_skips_safety_heartbeat
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/agent/loop_.rs
@@ -133,7 +133,7 @@ git commit -m "fix(agent): suppress heartbeat on screenshot follow-up"
 - Modify: `src/providers/compatible.rs`
 - Test: `src/providers/compatible.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add request-serialization tests around the OpenAI-compatible payload:
 
@@ -151,7 +151,7 @@ async fn screenshot_followup_request_preserves_tool_schema_when_present() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -162,7 +162,7 @@ cargo test screenshot_followup_request_preserves_tool_schema_when_present
 
 Expected: FAIL only if the current regression fixtures do not yet cover the screenshot follow-up shape.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 Preferred approach:
 - keep provider code unchanged
@@ -170,7 +170,7 @@ Preferred approach:
 
 Only patch provider code if Task 1 reveals a real serialization mismatch that contradicts the stored LiteLLM request body.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run:
 
@@ -181,7 +181,7 @@ cargo test screenshot_followup_request_preserves_tool_schema_when_present
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/providers/compatible.rs
@@ -194,7 +194,7 @@ git commit -m "test(compatible): cover screenshot follow-up request shape"
 - Modify: `src/providers/reliable.rs` (only if needed)
 - Test: `src/providers/reliable.rs` (only if needed)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Only add this task if Task 1 introduces new request-local state that could be lost or recomputed during retries. If heartbeat suppression is fully realized in the initial `request_messages` before `provider.chat(...)`, retries should already preserve the stripped shape and no code change is needed in `ReliableProvider`.
 
@@ -208,7 +208,7 @@ async fn screenshot_terminal_request_retries_do_not_reintroduce_heartbeat_or_too
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -218,14 +218,14 @@ cargo test screenshot_followup_request_retries_do_not_reintroduce_heartbeat
 
 Expected: FAIL only if retries rebuild or mutate the request in a way that reintroduces the heartbeat.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 Only if the test fails:
 - thread the terminal screenshot decision through the retry-local request rebuild
 - keep the fix local to `ReliableProvider::chat()`
 - do not broaden it into a general retry policy change
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run:
 
@@ -235,7 +235,7 @@ cargo test screenshot_followup_request_retries_do_not_reintroduce_heartbeat
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/providers/reliable.rs
@@ -248,7 +248,7 @@ git commit -m "fix(reliable): preserve screenshot follow-up heartbeat suppressio
 - Add: `docs/project/sam-screenshot-terminal-vision-turn-2026-04-12.md`
 - Modify: `docs/project/README.md`
 
-- [ ] **Step 1: Write the doc**
+- [x] **Step 1: Write the doc**
 
 Document:
 - the validated failing production request sequence
@@ -257,11 +257,11 @@ Document:
 - why tool-schema suppression is intentionally deferred pending a heartbeat-only validation result
 - rollback: revert the terminal-turn gating if it regresses legitimate screenshot-driven tool chains
 
-- [ ] **Step 2: Link it from the project index**
+- [x] **Step 2: Link it from the project index**
 
 Add the new entry to `docs/project/README.md`.
 
-- [ ] **Step 3: Verify docs formatting**
+- [x] **Step 3: Verify docs formatting**
 
 Run:
 
@@ -271,7 +271,7 @@ cargo fmt --all -- --check
 
 Expected: PASS for Rust formatting; docs require visual sanity check only.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/project/README.md docs/project/sam-screenshot-terminal-vision-turn-2026-04-12.md
