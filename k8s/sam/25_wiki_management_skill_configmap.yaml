@@ -7,117 +7,367 @@ data:
   wiki-management.md: |
     ---
     name: wiki-management
-    version: 1.0.0
+    version: 2.0.0
     description: >
-      Maintain a structured markdown wiki as your primary knowledge store. Use this
-      skill whenever you learn something worth keeping, ingest a document or URL,
-      answer a question that requires accumulated knowledge, or need to check what
-      you know about a topic. Also use when Dan says "remember this", "what do we
-      know about", "add this to the wiki", "look up", or asks about any topic where
-      your wiki might have relevant pages. If you are about to use memory_store for
-      anything other than a quick transient fact, use the wiki instead.
+      Maintain a structured markdown wiki as your primary knowledge store.
+      Use whenever you learn something worth keeping, ingest a document or
+      URL, answer a question that requires accumulated knowledge, or need
+      to check what you know about a topic. Also use when Dan says
+      "remember this", "what do we know about X", "add this to the wiki",
+      "look up", or asks about any topic where your wiki might have
+      relevant pages. If you are about to use memory_store for anything
+      other than a quick transient fact, use the wiki instead.
     always: false
     ---
 
     # Wiki Management
 
-    Your wiki is a persistent, structured knowledge base at /data/workspace/wiki/.
-    It grows as you ingest sources, answer questions, and learn from tasks.
-    The wiki is your primary knowledge store. Use memory_store only for transient
-    session-level facts. Anything worth keeping across sessions goes in the wiki.
+    Your wiki is a persistent markdown knowledge base at
+    `/data/workspace/wiki/`. It grows as you ingest sources, answer
+    questions, and learn from tasks. The wiki is the durable store.
+    `memory_store` is for transient session facts (current-turn
+    scratchpads, short-lived reminders). Anything worth keeping across
+    sessions, across pod restarts, or across different agent turns goes
+    in the wiki.
 
-    ## Directory Structure
+    Tools: `file_read`, `file_write`, `file_edit`, `glob_search`,
+    `content_search`, `memory_store`, `memory_recall`, `cron_add`,
+    `send_user_message`, `shell`.
 
+    ## Why paths are always absolute
+
+    The wiki lives at `/data/workspace/wiki/`. Your cwd is
+    `/data/.zeroclaw/workspace/`, which is a *different directory* on the
+    same PVC. Relative paths like `wiki/index.md` or
+    `entities/dan-jacobsen.md` silently resolve into your cwd and miss
+    the real wiki tree — you'll get "not found" errors for pages you
+    know exist. **Always use the full `/data/workspace/wiki/...` path**
+    when reading, writing, editing, or searching wiki content.
+    `workspace_only = false` in the security policy is what makes
+    absolute paths reachable — relative paths still join against cwd and
+    land in the wrong tree.
+
+    ## Directory structure
+
+    ```
     /data/workspace/wiki/
-      index.md        — catalog of all pages with one-line summaries
-      log.md          — append-only operations log
-      sources/        — immutable raw documents (never modify after saving)
-      entities/       — pages about people, projects, systems, services
-      concepts/       — pages about topics, decisions, patterns, technologies
-      syntheses/      — cross-cutting analysis spanning multiple entities/concepts
+      index.md         — catalog of all pages with one-line summaries
+      log.md           — append-only operations log
+      sources/         — immutable raw documents (never modify after saving)
+      entities/        — people, projects, systems, services, vendors
+      concepts/        — technologies, decisions, design patterns, topics
+      syntheses/       — cross-cutting analysis spanning multiple entities or concepts
+    ```
 
-    ## Bootstrap
+    ## Bootstrap (idempotent)
 
-    On first use, create the directory structure and seed files:
+    Safe to run on every new deployment. Existing files are not
+    overwritten.
+
+    ```
     shell: mkdir -p /data/workspace/wiki/sources /data/workspace/wiki/entities /data/workspace/wiki/concepts /data/workspace/wiki/syntheses
-    Then file_write /data/workspace/wiki/index.md and /data/workspace/wiki/log.md with initial headers.
+    ```
+
+    Then check `/data/workspace/wiki/index.md` and
+    `/data/workspace/wiki/log.md`. If either is empty (file exists but
+    0 bytes — a known state on pre-v2.0 deployments where directories
+    were created but seeding was skipped), populate them before doing
+    any other wiki operation.
+
+    `file_write /data/workspace/wiki/index.md` with this content:
+
+    ```markdown
+    # Wiki Index
+
+    Catalog of every page in the wiki with a one-line summary.
+    Keep entries sorted by category, then alphabetically within
+    category.
+
+    ## Entities
+
+    ## Concepts
+
+    ## Syntheses
+    ```
+
+    `file_write /data/workspace/wiki/log.md` with this content:
+
+    ```markdown
+    # Wiki Operations Log
+
+    Append-only record of ingest, query, and maintenance operations.
+    Newest entries at the bottom.
+    ```
 
     ## Operations
 
     ### Ingest
 
-    When Dan shares a document, URL content, meeting summary, or any knowledge source:
-    1. Save raw source to sources/ with descriptive filename. Never modify after saving.
-    2. Identify entities (people, projects, systems) and concepts (topics, decisions, patterns).
-    3. For each: check if page exists (glob_search). If yes, file_edit to add dated section. If new, file_write using page template.
-    4. If source connects multiple topics, write a synthesis page.
-    5. Update index.md with new pages.
-    6. Append to log.md: date, operation, source, pages created/updated.
+    When Dan shares a document, URL content, meeting summary, or any
+    knowledge source worth keeping:
+
+    1. **Save the raw source.** Use a descriptive absolute path:
+       `/data/workspace/wiki/sources/YYYY-MM-DD-slug.md`. For meetings,
+       the `daily-meeting-summary` skill already writes
+       `/data/workspace/wiki/sources/meetings-YYYY-MM-DD.md` to the same
+       tree — that counts as the source save, do not duplicate it.
+       Never modify a source file after saving; sources are immutable.
+
+    2. **Identify entities and concepts.** Read the source and list:
+       - People who committed to action items, or project names
+         mentioned for the first time → **entities**.
+       - Technical choices, decisions, design patterns, or topics →
+         **concepts**.
+       - Sources that genuinely link multiple existing entities or
+         concepts in a new way → **synthesis**.
+
+    3. **For each entity or concept, check whether a page exists.**
+
+       ```
+       glob_search /data/workspace/wiki/entities/<slug>.md
+       glob_search /data/workspace/wiki/concepts/<slug>.md
+       ```
+
+       - **Page exists**: `file_edit` to append a new dated section
+         under `## Details`. Anchor the edit on the `## Details` header
+         line, or on the most recent `### YYYY-MM-DD` subheader — both
+         are stable anchors. Do not rewrite old sections; always
+         append.
+       - **Page new**: `file_write` the absolute path
+         (`/data/workspace/wiki/entities/<slug>.md` or
+         `/data/workspace/wiki/concepts/<slug>.md`) using the **Page
+         template** below.
+
+    4. **Write a synthesis only when it's load-bearing.** A synthesis
+       page makes sense when a source connects multiple pre-existing
+       entities or concepts in a way none of them individually
+       captures. Most sources are just per-entity updates and do not
+       need a synthesis. Writing trivial syntheses dilutes the wiki.
+
+    5. **Update the index.** `file_edit /data/workspace/wiki/index.md`
+       to add a one-line entry under the correct category header for
+       any page you created. Do not touch entries for pages you only
+       updated.
+
+    6. **Append to the log.**
+
+       ```
+       file_edit /data/workspace/wiki/log.md
+       ```
+
+       Append a line like:
+
+       ```
+       2026-04-13 ingest: source=<filename>, created=[<pages>], updated=[<pages>]
+       ```
 
     ### Query
 
     When Dan asks about a topic or you need accumulated knowledge:
-    1. Search index.md for relevant pages.
-    2. Use content_search across wiki/ if not obvious from index.
-    3. Read relevant pages, synthesize answer, cite wiki pages.
-    4. File discoveries back: update pages with new insights, note gaps with "Gap:" prefix.
-    5. Append query and outcome to log.md.
+
+    1. **Start with the index.**
+       `file_read /data/workspace/wiki/index.md` and scan for relevant
+       page names. This is the fastest lookup when the index is
+       well-maintained.
+
+    2. **Fall back to full-text search.** If the index doesn't surface
+       anything:
+
+       ```
+       content_search /data/workspace/wiki/ <query>
+       ```
+
+       Absolute path is mandatory — relative paths resolve into your
+       cwd and will silently return nothing.
+
+    3. **Read the relevant pages.** `file_read` each candidate with
+       the full absolute path. Synthesize the answer and cite the page
+       slugs in your reply to Dan (e.g., *"per [[dan-jacobsen]] and
+       [[uptempo-positioning]]…"*).
+
+    4. **File discoveries back.** If you learned something new while
+       answering, `file_edit` the relevant page(s) to add a dated
+       section under `## Details`. If Dan asked about something you
+       couldn't find, add an `Open Questions` entry prefixed with
+       `Gap:` on the closest existing page so lint can surface it
+       later.
+
+    5. **Append to the log.**
+
+       ```
+       2026-04-13 query: topic=<topic>, pages_read=[<slugs>], outcome=<answered|gap>
+       ```
 
     ### Lint
 
-    Daily cron or on-demand. Check:
-    1. Pages missing from index.md.
-    2. Index entries with no matching file.
-    3. "Gap:" markers across all pages.
-    4. Stale pages (not updated in 30+ days, referencing active projects).
-    If issues: send Dan a summary. If clean: end silently.
+    Run on-demand when Dan asks you to "check the wiki", or via the
+    optional lint cron below. Checks:
 
-    Cron: name=wiki-lint, schedule=0 9 * * 1-5, timezone=America/Vancouver, job_type=agent, session_target=isolated.
-    Cron prompt: "You are in an isolated cron session. Do not call cron_run. Run wiki lint. Scan all wiki pages for missing index entries, orphaned references, Gap markers, stale pages. If clean end immediately. If issues send Dan a summary via send_user_message."
+    1. **Missing index entries.** For every `.md` file in
+       `/data/workspace/wiki/entities/`, `/data/workspace/wiki/concepts/`,
+       and `/data/workspace/wiki/syntheses/`, verify there's a
+       corresponding line in `/data/workspace/wiki/index.md`.
 
-    ## Page Template
+    2. **Orphaned index entries.** For every entry in the index,
+       verify the referenced page file exists.
 
-    Every wiki page:
-    # [Title]
+    3. **Gap markers.** `content_search /data/workspace/wiki/ "Gap:"`
+       and list unresolved open questions by page.
+
+    4. **Stale active pages.** Find pages whose `Last updated:`
+       frontmatter is more than 30 days old but are referenced by
+       recent log entries or newer pages — these are likely missing
+       follow-up content.
+
+    If issues are found: call `send_user_message` with a short summary
+    (one line per issue). If the wiki is clean: exit silently. No news
+    is good news — do not send an empty "all clean" report.
+
+    ### Lint cron (optional, not bootstrapped by default)
+
+    There is no `wiki-lint` cron by default. If Dan wants daily lint,
+    create it with `cron_add`:
+
+    - name: `wiki-lint`
+    - schedule: `0 9 * * 1-5`
+    - timezone: `America/Vancouver`
+    - job_type: `agent`
+    - session_target: `isolated`
+    - prompt: the block below, verbatim.
+
+    ```
+    You are in an isolated cron session for wiki-lint.
+    Run the wiki-management skill's Lint operation.
+    Do not call cron_run — you are already inside the cron job.
+    If the wiki is clean, exit silently with a one-line status.
+    If there are issues, summarize and call send_user_message.
+    ```
+
+    ## Page template
+
+    Every wiki page uses this exact structure. The slug is the
+    filename without `.md` and without directory — always lowercase,
+    hyphens for spaces, no special characters. Use the slug in
+    `[[link]]` cross-references.
+
+    ```markdown
+    # <Human-readable title>
     Category: entity | concept | synthesis
     Created: YYYY-MM-DD
     Last updated: YYYY-MM-DD
-    Related: [[other-page]], [[another-page]]
+    Related: [[other-page-slug]], [[another-page-slug]]
 
     ## Summary
-    One paragraph.
+
+    One paragraph. What is this page about and why does it exist?
 
     ## Details
-    Organized by topic with dated section headers for new information.
+
+    ### YYYY-MM-DD
+    - First fact or observation about this entity or concept.
+    - Second fact, with citation to the source if it came from an
+      ingest (e.g., "from meetings-2026-04-12.md").
 
     ## Open Questions
-    Unresolved questions prefixed with "Gap:" for lint.
 
-    ## Cross-References
+    - Gap: Unresolved question, prefixed for lint to catch.
+    ```
 
-    Use [[page-name]] for links (e.g., [[walter]], [[istio-ambient-mesh]]).
-    Always add reciprocal references: if A links B, B should link A.
-    These are plain text now. The wiki module will make them real links later.
+    ### Concrete example
 
-    ## What Goes Where
+    A real entity page looks like:
 
-    Entities (wiki/entities/): people, projects, systems, services.
-    Concepts (wiki/concepts/): technologies, decisions, patterns.
-    Syntheses (wiki/syntheses/): cross-cutting analysis connecting multiple entities/concepts.
+    ```markdown
+    # Dan Jacobsen
+    Category: entity
+    Created: 2026-04-12
+    Last updated: 2026-04-13
+    Related: [[uptempo-positioning]], [[speakr]]
 
-    ## Ingest Triggers
+    ## Summary
 
-    - Dan shares a document or URL
-    - Meeting summary completes (key decisions and action items)
-    - Multi-step task completed with lessons learned
-    - Dan makes a decision worth recording
-    - Discovery during research
+    Senior Product Manager and primary collaborator on the Uptempo
+    re-engagement strategy.
 
-    ## Tools
+    ## Details
 
-    file_read, file_write, file_edit: page CRUD.
-    glob_search: find pages by name.
-    content_search: full-text search across wiki.
-    memory_store: quick-lookup cache only (wiki-ref/page-name = one-line summary).
-    send_user_message: lint notifications.
-    cron_add: lint scheduling.
+    ### 2026-04-12
+    - Involved in JMS re-engagement strategy (from meetings-2026-04-12.md).
+    - Managing sprint transitions and task visibility for the team.
+
+    ### 2026-04-13
+    - Confirmed Q3 positioning decision: coexistence over replacement.
+
+    ## Open Questions
+
+    - Gap: Who owns the customer comms rollout timeline?
+    ```
+
+    ## Cross-references
+
+    Use `[[slug]]` in the `Related:` header and in inline prose. The
+    slug is the filename without `.md` and without directory — Sam
+    resolves the directory from the page's `Category:` field, not from
+    the link syntax. Examples: `[[dan-jacobsen]]`,
+    `[[uptempo-positioning]]`, `[[istio-ambient-mesh]]`.
+
+    Always add reciprocal references: if page A links to B, B should
+    also link to A in its `Related:` header. This keeps the wiki
+    navigable in either direction.
+
+    These are plain-text links for now — there is no wiki-link
+    resolver. Treat them as documentation of intent, not runtime
+    navigation.
+
+    ## What goes where
+
+    | Category | Directory | Examples |
+    |----------|-----------|----------|
+    | entity | `/data/workspace/wiki/entities/` | People, projects, systems, services, vendors |
+    | concept | `/data/workspace/wiki/concepts/` | Technologies, decisions, design patterns, topics |
+    | synthesis | `/data/workspace/wiki/syntheses/` | Cross-cutting analysis spanning multiple entities or concepts |
+
+    When in doubt, prefer **concept** for abstract ideas and **entity**
+    for things you could point at in the physical world. Syntheses are
+    rare — default to a regular entity or concept page with `Related:`
+    links instead of spawning a new synthesis.
+
+    ## Ingest triggers
+
+    Trigger ingest when:
+
+    - Dan shares a document or URL worth remembering.
+    - A meeting summary completes with new decisions or action items.
+    - A multi-step task completes with a lesson learned that future
+      sessions should know.
+    - Dan makes a decision worth recording.
+    - You discover something during research that resolves a `Gap:`
+      marker on an existing page.
+
+    Do **not** ingest routine chatter, transient debugging notes, or
+    content that would duplicate an existing page without adding new
+    information. Writing a trivial page is worse than writing none — it
+    dilutes the signal-to-noise ratio when Dan queries later.
+
+    ## Failure modes
+
+    - `file_read` returns "not found" on a page you know exists → you
+      almost certainly used a relative path. Re-read the "Why paths are
+      always absolute" section and retry with the full
+      `/data/workspace/wiki/...` path.
+    - `content_search` returns nothing for a topic you're sure is in
+      the wiki → same root cause; the search path must also be
+      absolute (`content_search /data/workspace/wiki/ <query>`).
+    - `file_edit` fails with "old_string not found" → the anchor you
+      chose no longer matches the page. Re-read the page, pick a new
+      anchor (`## Details` is the safest fallback), and retry.
+    - `glob_search` returns a match in both `entities/` and `concepts/`
+      for the same slug → naming collision. Pick the directory that
+      fits the `Category:` of the real content and rename the other
+      page to disambiguate. Log the rename in `/data/workspace/wiki/log.md`.
+    - `/data/workspace/wiki/index.md` or `log.md` is 0 bytes → pre-v2.0
+      bootstrap state. Run the Bootstrap section to seed them before
+      continuing.
+    - `send_user_message` fails during Lint → fall back to writing a
+      summary into `/data/workspace/wiki/log.md` so the lint result
+      isn't lost, then surface on the next interactive turn.
