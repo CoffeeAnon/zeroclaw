@@ -306,6 +306,13 @@ impl OpenAiCompatibleProvider {
     }
 
     fn http_client(&self) -> Client {
+        // Read both timeouts from runtime config. `reliability.provider_*_timeout_secs`
+        // live in a process-wide OnceLock so this is a cheap read, and it means
+        // operators can tune timeouts in config.toml without a rebuild. 300s is
+        // the default to match LiteLLM's server-side timeout and give slow
+        // backends like Gemma 4 room to finish tool-call loops on large contexts.
+        let timeouts = crate::config::runtime_provider_timeouts();
+
         if let Some(ua) = self.user_agent.as_deref() {
             let mut headers = HeaderMap::new();
             if let Ok(value) = HeaderValue::from_str(ua) {
@@ -313,8 +320,8 @@ impl OpenAiCompatibleProvider {
             }
 
             let builder = Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(timeouts.request_secs))
+                .connect_timeout(std::time::Duration::from_secs(timeouts.connect_secs))
                 .default_headers(headers);
             let builder =
                 crate::config::apply_runtime_proxy_to_builder(builder, "provider.compatible");
@@ -325,7 +332,11 @@ impl OpenAiCompatibleProvider {
             });
         }
 
-        crate::config::build_runtime_proxy_client_with_timeouts("provider.compatible", 120, 10)
+        crate::config::build_runtime_proxy_client_with_timeouts(
+            "provider.compatible",
+            timeouts.request_secs,
+            timeouts.connect_secs,
+        )
     }
 
     /// Build the full URL for chat completions, detecting if base_url already includes the path.

@@ -158,6 +158,28 @@ const SUPPORTED_PROXY_SERVICE_SELECTORS: &[&str] = &[
 static RUNTIME_PROXY_CONFIG: OnceLock<RwLock<ProxyConfig>> = OnceLock::new();
 static RUNTIME_PROXY_CLIENT_CACHE: OnceLock<RwLock<HashMap<String, reqwest::Client>>> =
     OnceLock::new();
+static RUNTIME_PROVIDER_TIMEOUTS: OnceLock<RwLock<RuntimeProviderTimeouts>> = OnceLock::new();
+
+/// HTTP client timeouts applied globally to OpenAI-compatible providers.
+///
+/// Resolved from `[reliability]` at config load time and cached here so
+/// `OpenAiCompatibleProvider::http_client()` doesn't need to re-read config
+/// on every call. Split out from reliability config so that callers which
+/// don't care about retries can still read timeouts cheaply.
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeProviderTimeouts {
+    pub request_secs: u64,
+    pub connect_secs: u64,
+}
+
+impl Default for RuntimeProviderTimeouts {
+    fn default() -> Self {
+        Self {
+            request_secs: default_provider_request_timeout_secs(),
+            connect_secs: default_provider_connect_timeout_secs(),
+        }
+    }
+}
 const DEFAULT_PROVIDER_NAME: &str = "openrouter";
 const DEFAULT_MODEL_NAME: &str = "anthropic/claude-sonnet-4.6";
 
@@ -2986,6 +3008,32 @@ pub fn runtime_proxy_config() -> ProxyConfig {
     }
 }
 
+fn runtime_provider_timeouts_state() -> &'static RwLock<RuntimeProviderTimeouts> {
+    RUNTIME_PROVIDER_TIMEOUTS.get_or_init(|| RwLock::new(RuntimeProviderTimeouts::default()))
+}
+
+pub fn set_runtime_provider_timeouts(timeouts: RuntimeProviderTimeouts) {
+    match runtime_provider_timeouts_state().write() {
+        Ok(mut guard) => {
+            *guard = timeouts;
+        }
+        Err(poisoned) => {
+            *poisoned.into_inner() = timeouts;
+        }
+    }
+
+    // A change in timeouts means cached clients were built with the old
+    // values — drop them so the next provider call picks up the new config.
+    clear_runtime_proxy_client_cache();
+}
+
+pub fn runtime_provider_timeouts() -> RuntimeProviderTimeouts {
+    match runtime_provider_timeouts_state().read() {
+        Ok(guard) => *guard,
+        Err(poisoned) => *poisoned.into_inner(),
+    }
+}
+
 pub fn apply_runtime_proxy_to_builder(
     builder: reqwest::ClientBuilder,
     service_key: &str,
@@ -4238,6 +4286,20 @@ pub struct ReliabilityConfig {
     /// Max retries for cron job execution attempts.
     #[serde(default = "default_scheduler_retries")]
     pub scheduler_retries: u32,
+    /// Total request timeout (seconds) for OpenAI-compatible provider HTTP calls.
+    /// Covers connect + TLS + send + response body. Must be at least as large as
+    /// the slowest expected backend inference. Default 300s matches LiteLLM's
+    /// server-side default and gives Gemma 4 room to complete tool-call loops
+    /// with large contexts. Previous hardcoded value was 120s, which truncated
+    /// legitimate Gemma 4 responses and made `reliable` retries flap.
+    #[serde(default = "default_provider_request_timeout_secs")]
+    pub provider_request_timeout_secs: u64,
+    /// Connect-phase timeout (seconds) for OpenAI-compatible provider HTTP
+    /// calls. Only covers TCP + TLS handshake, not the full request. Short
+    /// values here fail fast when DNS or routing is broken without capping
+    /// long-running requests.
+    #[serde(default = "default_provider_connect_timeout_secs")]
+    pub provider_connect_timeout_secs: u64,
 }
 
 fn default_provider_retries() -> u32 {
@@ -4264,6 +4326,14 @@ fn default_scheduler_retries() -> u32 {
     2
 }
 
+fn default_provider_request_timeout_secs() -> u64 {
+    300
+}
+
+fn default_provider_connect_timeout_secs() -> u64 {
+    10
+}
+
 impl Default for ReliabilityConfig {
     fn default() -> Self {
         Self {
@@ -4276,6 +4346,8 @@ impl Default for ReliabilityConfig {
             channel_max_backoff_secs: default_channel_backoff_max_secs(),
             scheduler_poll_secs: default_scheduler_poll_secs(),
             scheduler_retries: default_scheduler_retries(),
+            provider_request_timeout_secs: default_provider_request_timeout_secs(),
+            provider_connect_timeout_secs: default_provider_connect_timeout_secs(),
         }
     }
 }
@@ -9703,6 +9775,11 @@ impl Config {
         }
 
         set_runtime_proxy_config(self.proxy.clone());
+
+        set_runtime_provider_timeouts(RuntimeProviderTimeouts {
+            request_secs: self.reliability.provider_request_timeout_secs,
+            connect_secs: self.reliability.provider_connect_timeout_secs,
+        });
 
         // Gateway paired tokens: ZEROCLAW_GATEWAY_PAIRED_TOKENS (comma-separated)
         if let Ok(tokens) = std::env::var("ZEROCLAW_GATEWAY_PAIRED_TOKENS") {

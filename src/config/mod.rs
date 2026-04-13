@@ -5,7 +5,8 @@ pub mod traits;
 pub use schema::{
     apply_runtime_proxy_to_builder, build_runtime_proxy_client,
     build_runtime_proxy_client_with_timeouts, default_model_fallback_for_provider,
-    resolve_default_model_id, runtime_proxy_config, set_runtime_proxy_config,
+    resolve_default_model_id, runtime_provider_timeouts, runtime_proxy_config,
+    set_runtime_provider_timeouts, set_runtime_proxy_config, RuntimeProviderTimeouts,
     AckReactionChannelsConfig, AckReactionChatType, AckReactionConfig, AckReactionRuleAction,
     AckReactionRuleConfig, AckReactionStrategy, AgentConfig, AgentLoadBalanceStrategy,
     AgentSessionBackend, AgentSessionConfig, AgentSessionStrategy, AgentTeamsConfig,
