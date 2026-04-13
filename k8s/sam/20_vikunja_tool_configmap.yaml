@@ -393,11 +393,22 @@ data:
 
         if cmd == "projects":
             cmd_projects(rest)
-        elif cmd == "project" and rest and rest[0] == "create":
-            cmd_project_create(rest[1:])
+        elif cmd == "project" and rest:
+            if rest[0] in ("help", "--help", "-h"):
+                print_command_help("project create")
+                sys.exit(0)
+            elif rest[0] == "create":
+                cmd_project_create(rest[1:])
+            else:
+                print(f"Unknown project subcommand: {rest[0]}", file=sys.stderr)
+                print(__doc__)
+                sys.exit(1)
         elif cmd == "tasks":
             cmd_tasks(rest)
         elif cmd == "task" and rest:
+            if rest[0] in ("help", "--help", "-h"):
+                print(__doc__)
+                sys.exit(0)
             subcmd = rest[0]
             if subcmd == "create":
                 cmd_task_create(rest[1:])
@@ -409,6 +420,7 @@ data:
                 cmd_task_comment(rest[1:])
             else:
                 print(f"Unknown task subcommand: {subcmd}", file=sys.stderr)
+                print(__doc__)
                 sys.exit(1)
         else:
             print(f"Unknown command: {cmd}", file=sys.stderr)
