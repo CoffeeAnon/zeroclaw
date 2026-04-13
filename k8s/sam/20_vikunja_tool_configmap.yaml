@@ -248,12 +248,7 @@ data:
             print("Usage: vikunja tasks <project-id>", file=sys.stderr)
             sys.exit(1)
         project_id = args[0]
-        # Get the list view (first view) for this project
-        views = _api("GET", f"/projects/{project_id}/views")
-        if not views:
-            print("No views found for this project.")
-            return
-        view_id = views[0].get("id")
+        view_id = _get_list_view_id(project_id)
         task_list = _api("GET", f"/projects/{project_id}/views/{view_id}/tasks")
         if not task_list:
             print(f"No tasks in project #{project_id}.")
@@ -556,6 +551,86 @@ data:
         sys.exit(1)
 
 
+    def _get_list_view_id(project_id):
+        """Return the ID of the first 'list' view for a project, or the first view if none is list-kind."""
+        views = _api("GET", f"/projects/{project_id}/views")
+        if not views:
+            print(f"ERROR: Project #{project_id} has no views.", file=sys.stderr)
+            sys.exit(1)
+        for v in views:
+            if v.get("view_kind") == "list":
+                return v["id"]
+        return views[0]["id"]
+
+
+    def cmd_tasks_reorder(args):
+        """Resequence every task in a project so --order tasks come first, rest follow."""
+        _check_help(args, "tasks reorder")
+        flags, positional = _parse_args(args, {"order": "str"})
+        if not positional or "order" not in flags:
+            print_command_help("tasks reorder")
+            sys.exit(1)
+        project_id = positional[0]
+        requested = [x.strip() for x in flags["order"].split(",") if x.strip()]
+        if not requested:
+            print("ERROR: --order must list at least one task ID", file=sys.stderr)
+            sys.exit(1)
+
+        # Reject duplicate IDs in --order — ambiguous intent and would crash
+        # the "remaining tasks" computation below.
+        seen = set()
+        dupes = []
+        for tid in requested:
+            if tid in seen:
+                dupes.append(tid)
+            seen.add(tid)
+        if dupes:
+            print(f"ERROR: --order contains duplicate IDs: {','.join(dupes)}", file=sys.stderr)
+            sys.exit(1)
+
+        view_id = _get_list_view_id(project_id)
+        current = _api("GET", f"/projects/{project_id}/views/{view_id}/tasks") or []
+        # Current list-view ordering is the source of truth for "remaining tasks".
+        current_ids = [str(t.get("id")) for t in current]
+        current_set = set(current_ids)
+
+        unknown = [tid for tid in requested if tid not in current_set]
+        if unknown:
+            print(
+                f"ERROR: task ID(s) not in project #{project_id} (view #{view_id}): "
+                f"{','.join(unknown)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # Full deterministic sequence: explicit IDs first (in user order),
+        # then every remaining ID in its existing display order. This makes
+        # the operation a total resequence, not a partial rewrite — so the
+        # final order cannot depend on whatever stale positions happened to
+        # exist before the command ran.
+        requested_set = set(requested)
+        remaining = [tid for tid in current_ids if tid not in requested_set]
+        final_order = requested + remaining
+
+        print(
+            f"Resequencing {len(final_order)} task(s) in project #{project_id} "
+            f"(view #{view_id}): {len(requested)} explicit + {len(remaining)} trailing"
+        )
+
+        # Match Vikunja's native spacing so future fine-grained inserts can
+        # slot between existing tasks without needing a full re-space.
+        step = 65536.0
+        for i, task_id in enumerate(final_order):
+            position = step * (i + 1)
+            marker = "*" if task_id in requested_set else " "
+            _api("POST", f"/tasks/{task_id}/position", {
+                "project_view_id": int(view_id),
+                "position": position,
+            })
+            print(f"  {marker} #{task_id} -> position {position}")
+        print(f"Done. Resequenced {len(final_order)} task(s) (* = from --order).")
+
+
     def main():
         if len(sys.argv) < 2:
             print(__doc__)
@@ -585,7 +660,10 @@ data:
                 print(__doc__)
                 sys.exit(1)
         elif cmd == "tasks":
-            cmd_tasks(rest)
+            if rest and rest[0] == "reorder":
+                cmd_tasks_reorder(rest[1:])
+            else:
+                cmd_tasks(rest)
         elif cmd == "labels":
             cmd_labels(rest)
         elif cmd == "label" and rest:
