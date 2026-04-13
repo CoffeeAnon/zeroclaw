@@ -447,6 +447,27 @@ pub struct ModelProviderConfig {
     /// If true, load OpenAI auth material (OPENAI_API_KEY or ~/.codex/auth.json).
     #[serde(default)]
     pub requires_openai_auth: bool,
+    /// Azure OpenAI resource name (e.g. "my-resource" in https://my-resource.openai.azure.com).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure_openai_resource: Option<String>,
+    /// Azure OpenAI deployment name (e.g. "gpt-4o").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure_openai_deployment: Option<String>,
+    /// Azure OpenAI API version (defaults to "2024-08-01-preview").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure_openai_api_version: Option<String>,
+    /// Optional maximum output tokens to send in API requests.
+    /// When set, overrides the provider's default `max_tokens` value.
+    /// Useful for providers like OpenRouter where the platform default (65536)
+    /// may exceed a model's actual limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// When true, all system messages are collected and prepended to the first
+    /// user message instead of being sent with `role: system`. Native tool
+    /// calling is preserved. Useful for local model servers (e.g. llama.cpp)
+    /// whose chat template rejects system messages at non-first positions.
+    #[serde(default)]
+    pub merge_system_into_user: bool,
 }
 
 /// Provider behavior overrides (`[provider]` section).
@@ -1192,6 +1213,13 @@ pub struct AgentConfig {
     /// set to `0` for explicit disable.
     #[serde(default = "default_safety_heartbeat_turn_interval")]
     pub safety_heartbeat_turn_interval: usize,
+    /// When `true`, only native/structured tool calls from the provider are
+    /// honoured.  Text-based fallback parsing (XML tags, markdown blocks, GLM
+    /// format) is skipped entirely.  This is useful for providers that reliably
+    /// emit structured tool calls and where text artefacts should be treated as
+    /// regular assistant output rather than tool invocations.  Default: `false`.
+    #[serde(default)]
+    pub native_tool_calls_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1303,6 +1331,7 @@ impl Default for AgentConfig {
             loop_detection_failure_streak: default_loop_detection_failure_streak(),
             safety_heartbeat_interval: default_safety_heartbeat_interval(),
             safety_heartbeat_turn_interval: default_safety_heartbeat_turn_interval(),
+            native_tool_calls_only: false,
         }
     }
 }
@@ -12943,6 +12972,11 @@ provider_api = "not-a-real-mode"
                     default_model: None,
                     api_key: None,
                     requires_openai_auth: false,
+                    azure_openai_resource: None,
+                    azure_openai_deployment: None,
+                    azure_openai_api_version: None,
+                    max_tokens: None,
+                    merge_system_into_user: false,
                 },
             )]),
             ..Config::default()
@@ -12973,6 +13007,11 @@ provider_api = "not-a-real-mode"
                     default_model: None,
                     api_key: None,
                     requires_openai_auth: true,
+                    azure_openai_resource: None,
+                    azure_openai_deployment: None,
+                    azure_openai_api_version: None,
+                    max_tokens: None,
+                    merge_system_into_user: false,
                 },
             )]),
             api_key: None,
@@ -13037,6 +13076,11 @@ provider_api = "not-a-real-mode"
                     default_model: None,
                     api_key: None,
                     requires_openai_auth: false,
+                    azure_openai_resource: None,
+                    azure_openai_deployment: None,
+                    azure_openai_api_version: None,
+                    max_tokens: None,
+                    merge_system_into_user: false,
                 },
             )]),
             ..Config::default()
@@ -13063,6 +13107,11 @@ provider_api = "not-a-real-mode"
                     default_model: None,
                     api_key: Some("profile-api-key".to_string()),
                     requires_openai_auth: false,
+                    azure_openai_resource: None,
+                    azure_openai_deployment: None,
+                    azure_openai_api_version: None,
+                    max_tokens: None,
+                    merge_system_into_user: false,
                 },
             )]),
             ..Config::default()
@@ -13087,6 +13136,11 @@ provider_api = "not-a-real-mode"
                     default_model: Some("qwen-max".to_string()),
                     api_key: None,
                     requires_openai_auth: false,
+                    azure_openai_resource: None,
+                    azure_openai_deployment: None,
+                    azure_openai_api_version: None,
+                    max_tokens: None,
+                    merge_system_into_user: false,
                 },
             )]),
             ..Config::default()

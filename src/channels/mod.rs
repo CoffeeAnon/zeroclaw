@@ -371,6 +371,7 @@ struct ChannelRuntimeContext {
     /// Per-conversation injection queues for mid-turn message injection.
     /// Populated when a loop starts for a sender, removed on exit.
     injection_queues: injection::InjectionQueueMap,
+    native_tool_calls_only: bool,
 }
 
 #[derive(Clone)]
@@ -4165,6 +4166,7 @@ or tune thresholds in config.",
                             failure_streak_threshold: runtime_defaults.loop_detection_failure_streak,
                         }),
                         if recovery_attempt == 0 { injection_rx_opt.take() } else { None },
+                        ctx.native_tool_calls_only,
                     ),
                 ),
             ) => LlmExecutionResult::Completed(result),
@@ -5914,19 +5916,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
     }
 
     let provider_name = resolved_default_provider(&config);
-    let provider_runtime_options = providers::ProviderRuntimeOptions {
-        auth_profile_override: None,
-        provider_api_url: config.api_url.clone(),
-        provider_transport: config.effective_provider_transport(),
-        zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
-        secrets_encrypt: config.secrets.encrypt,
-        reasoning_enabled: config.runtime.reasoning_enabled,
-        reasoning_level: config.effective_provider_reasoning_level(),
-        custom_provider_api_mode: config.provider_api.map(|mode| mode.as_compatible_mode()),
-        custom_provider_supports_responses_fallback: config.supports_responses_fallback,
-        max_tokens_override: None,
-        model_support_vision: config.model_support_vision,
-    };
+    let provider_runtime_options = providers::provider_runtime_options_from_config(&config);
     let provider: Arc<dyn Provider> = Arc::from(
         create_resilient_provider_nonblocking(
             &provider_name,
@@ -6340,6 +6330,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         private_sessions: Arc::new(Mutex::new(HashSet::new())),
         private_session_excluded_tools: config.autonomy.private_session_excluded_tools.clone(),
         injection_queues: Arc::new(Mutex::new(HashMap::new())),
+        native_tool_calls_only: config.agent.native_tool_calls_only,
     });
 
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
@@ -6837,6 +6828,7 @@ mod tests {
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -6899,6 +6891,7 @@ mod tests {
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -6964,6 +6957,7 @@ mod tests {
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -7652,6 +7646,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -7744,6 +7739,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -7823,6 +7819,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -7916,6 +7913,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -8008,6 +8006,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -8085,6 +8084,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -8164,6 +8164,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -8245,6 +8246,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -8357,6 +8359,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
         assert_eq!(
             runtime_ctx
@@ -8500,6 +8503,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -8594,6 +8598,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -8677,6 +8682,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         let runtime_ctx_for_first_turn = runtime_ctx.clone();
@@ -8846,6 +8852,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
         assert_eq!(
             runtime_ctx
@@ -8966,6 +8973,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -9081,6 +9089,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -9178,6 +9187,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -9285,6 +9295,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -9393,6 +9404,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -9549,6 +9561,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
         maybe_apply_runtime_config_update(runtime_ctx.as_ref())
             .await
@@ -9651,6 +9664,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -9806,6 +9820,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -9931,6 +9946,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -10036,6 +10052,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -10160,6 +10177,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -10285,6 +10303,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -10369,6 +10388,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -10490,6 +10510,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -10682,6 +10703,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         maybe_apply_runtime_config_update(runtime_ctx.as_ref())
@@ -10844,6 +10866,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -10917,6 +10940,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -11104,6 +11128,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -11199,6 +11224,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -11306,6 +11332,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -11395,6 +11422,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -11469,6 +11497,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -12178,6 +12207,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -12279,6 +12309,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -12379,6 +12410,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -12483,6 +12515,7 @@ BTC is currently around $65,000 based on latest tool output."#
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
@@ -13318,6 +13351,7 @@ BTC is currently around $65,000 based on latest tool output."#;
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         // Simulate a photo attachment message with [IMAGE:] marker.
@@ -13401,6 +13435,7 @@ BTC is currently around $65,000 based on latest tool output."#;
             private_sessions: Arc::new(Mutex::new(HashSet::new())),
             private_session_excluded_tools: Vec::new(),
             injection_queues: Arc::new(Mutex::new(HashMap::new())),
+            native_tool_calls_only: false,
         });
 
         process_channel_message(
