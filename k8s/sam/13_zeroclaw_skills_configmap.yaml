@@ -65,31 +65,106 @@ data:
     ---
     name: vikunja-project-manager
     version: 2.0.0
-    description: Manage tasks via Vikunja CLI. Use for project status, task tracking, and TODO lists.
+    description: Manage project status, tasks, priorities, labels, and ordering via the vikunja CLI. Use whenever Dan asks about project status, task tracking, TODO lists, prioritizing a list, removing duplicates, or wants to communicate progress on work items.
     ---
 
     # Vikunja Project Manager
 
-    CLI tool on PATH, already authenticated. Run via shell (e.g., vikunja projects).
+    You have a `vikunja` CLI tool that manages projects, tasks, labels, and
+    ordering on the team's Vikunja instance (todolist.coffee-anon.com). Use it
+    to track work status, create actionable task lists, and report progress.
 
-    ## Commands
+    ## When to use this
 
-    vikunja projects — list all projects.
-    vikunja project create --title "..." — create project.
-    vikunja tasks PROJECT_ID — list tasks.
-    vikunja task create PROJECT_ID --title "..." [--description "..."] [--due "YYYY-MM-DD"] [--priority 1-5] [--assignee USERNAME] — create task.
-    vikunja task update TASK_ID [--done] [--title "..."] [--assignee USERNAME] — update task.
-    vikunja task assign TASK_ID --user USERNAME — assign task.
-    vikunja task comment TASK_ID --body "..." — add comment.
+    - Dan asks about project status or what's being worked on
+    - Dan asks you to prioritize, reorder, or clean up a list
+    - Dan asks you to remove duplicates from a project
+    - You complete work and want to record it
+    - You need to check what's outstanding before starting work
 
-    ## Users
+    ## Discovering usage
 
-    Known usernames: dan, sam, admin. Assign Dan to his action items, yourself to tasks you track.
+    Every command supports `--help`. When you are unsure, run it:
 
-    ## Workflow
+    ```
+    vikunja help                     # Top-level command list
+    vikunja help task create         # Detailed help for a specific command
+    vikunja task label --help        # Same, via --help on the subcommand
+    ```
 
-    New initiative: check if project exists first, create if needed, break into tasks with priorities and due dates.
-    Updating: vikunja tasks ID to see state, task update --done when complete, task comment for decisions or blockers.
-    Reporting: vikunja tasks ID, then summarize done/in-progress/blocked.
+    ## Command reference
 
-    Priority 1 (lowest) through 5 (highest). Due dates: --due "YYYY-MM-DD". Task titles should be short and actionable.
+    ```
+    vikunja projects
+    vikunja project create --title "..."
+
+    vikunja tasks <project-id> [--sort position|priority|due] [--format text|json]
+    vikunja tasks reorder <project-id> --order "id1,id2,id3"
+
+    vikunja task create <project-id> --title "..." [--description "..."] [--due "YYYY-MM-DD"] [--priority 1-5] [--assignee user]
+    vikunja task update <task-id>   [--done] [--title "..."] [--description "..."] [--due "..."] [--priority 1-5] [--assignee user]
+    vikunja task show   <task-id>
+    vikunja task delete <task-id>
+    vikunja task assign <task-id> --user <username>
+    vikunja task comment <task-id> --body "..."
+
+    vikunja task label <task-id> --list
+    vikunja task label <task-id> --add "name" [--create-missing] [--color ff0000]
+    vikunja task label <task-id> --remove "name"
+
+    vikunja labels [--search "..."]
+    vikunja label create --title "..." [--color "ff0000"] [--description "..."]
+    ```
+
+    ## Two ways to signal priority
+
+    Vikunja has two independent priority signals. Use them together:
+
+    1. **Native priority integer (1-5)** — stored on the task itself, used by
+       `--sort priority`. Set it with `vikunja task update <id> --priority 5`.
+       This is the field the UI sorts and color-codes by default.
+    2. **Labels** — free-form colored tags. Useful for named priorities
+       ("urgent", "blocked", "waiting") that should be visible at a glance
+       in the list view. Attach with `vikunja task label <id> --add "urgent"`.
+
+    When Dan asks you to "prioritize" a list, set both the integer priority
+    AND an appropriate label so the signal is visible in every view.
+
+    ## Workflow: prioritize an existing project
+
+    1. `vikunja tasks <project-id>` — read the current list.
+    2. Decide the priority order in your head.
+    3. For each task, `vikunja task update <id> --priority N` (1=lowest, 5=highest).
+    4. Optionally attach labels: `vikunja task label <id> --add "urgent" --create-missing --color ff0000`.
+    5. Rewrite the display order in one call:
+       `vikunja tasks reorder <project-id> --order "id-of-top,id-of-next,..."`.
+    6. Verify with `vikunja tasks <project-id> --sort priority`.
+
+    ## Workflow: remove duplicates
+
+    1. `vikunja tasks <project-id> --format json` — get machine-readable task data.
+    2. Scan the JSON for tasks with the same or near-identical `title`.
+    3. For each duplicate, pick the one to keep (usually the oldest by `id`
+       or the one with more context — comments, labels, assignees).
+    4. For each duplicate to remove, `vikunja task delete <id>`.
+    5. Verify with `vikunja tasks <project-id>`.
+
+    ## Workflow: starting a new initiative
+
+    1. `vikunja project create --title "Initiative Name"`
+    2. Create tasks in priority order:
+       `vikunja task create <id> --title "..." --priority 4`
+    3. Reorder if you created them out of sequence:
+       `vikunja tasks reorder <id> --order "..."`
+    4. Report the project ID and task list to Dan.
+
+    ## Tips
+
+    - `--priority` is 1 (lowest) through 5 (highest).
+    - `--sort priority` is read-only — it changes the display of `vikunja tasks`
+      but does not change the stored order. Use `tasks reorder` to persist.
+    - `task show` is your detail view — use it whenever a list line isn't enough.
+    - `--format json` is the right tool for programmatic reasoning; the default
+      text format is for quick human-facing status reports.
+    - Keep task titles short and actionable ("Deploy vikunja postgres", not
+      "We need to set up the database").
