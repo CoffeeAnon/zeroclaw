@@ -90,8 +90,129 @@ data:
         return parsed, positional
 
 
+    COMMAND_HELP = {
+        "projects": (
+            'Usage: vikunja projects\n'
+            '\n'
+            '  List all projects you have access to.\n'
+        ),
+        "project create": (
+            'Usage: vikunja project create --title "..." [--description "..."]\n'
+            '\n'
+            '  Create a new project.\n'
+        ),
+        "tasks": (
+            'Usage: vikunja tasks <project-id> [--sort position|priority|due] [--format text|json]\n'
+            '\n'
+            '  List tasks in a project.\n'
+            '\n'
+            'Flags:\n'
+            '  --sort FIELD     position (default, respects manual reorder), priority (highest first), due (earliest first)\n'
+            '  --format FORMAT  text (default) or json (machine-readable, full task records)\n'
+        ),
+        "tasks reorder": (
+            'Usage: vikunja tasks reorder <project-id> --order "id1,id2,id3,..."\n'
+            '\n'
+            '  Resequence every task in a project so the IDs you pass appear\n'
+            '  first, in the order you gave them, and any tasks you did NOT\n'
+            '  mention keep their relative order but are placed after the\n'
+            '  explicit block. Every task in the view gets a fresh position,\n'
+            '  so the result is deterministic regardless of prior state.\n'
+            '\n'
+            '  All IDs in --order must belong to the project, must be unique,\n'
+            '  and must be visible in the default list view.\n'
+            '\n'
+            'Example:\n'
+            '  vikunja tasks reorder 4 --order "17,23,19,12"\n'
+        ),
+        "task create": (
+            'Usage: vikunja task create <project-id> --title "..." \\\n'
+            '         [--description "..."] [--due "YYYY-MM-DD"] [--priority 1-5] [--assignee <username>]\n'
+            '\n'
+            '  Create a new task in a project. --priority is the native integer\n'
+            '  priority field (1=lowest, 5=highest). For visual priority labels\n'
+            '  use `vikunja task label`.\n'
+        ),
+        "task update": (
+            'Usage: vikunja task update <task-id> [--done] [--title "..."] \\\n'
+            '         [--description "..."] [--due "YYYY-MM-DD"] [--priority 1-5] [--assignee <username>]\n'
+            '\n'
+            '  Update an existing task. Any omitted field is left unchanged.\n'
+        ),
+        "task show": (
+            'Usage: vikunja task show <task-id>\n'
+            '\n'
+            '  Show full details for a task: title, description, priority,\n'
+            '  labels, due date, assignees, and comments.\n'
+        ),
+        "task delete": (
+            'Usage: vikunja task delete <task-id>\n'
+            '\n'
+            '  Delete a task permanently. Use this to remove duplicates.\n'
+        ),
+        "task assign": (
+            'Usage: vikunja task assign <task-id> --user <username>\n'
+            '\n'
+            '  Assign a user to a task.\n'
+        ),
+        "task comment": (
+            'Usage: vikunja task comment <task-id> --body "..."\n'
+            '\n'
+            '  Add a comment to a task.\n'
+        ),
+        "task label": (
+            'Usage:\n'
+            '  vikunja task label <task-id> --list\n'
+            '  vikunja task label <task-id> --add "name" [--create-missing] [--color ff0000]\n'
+            '  vikunja task label <task-id> --remove "name"\n'
+            '\n'
+            '  Manage labels on a task. Labels are looked up by name (exact match).\n'
+            '  With --create-missing, a label that does not yet exist is created\n'
+            '  automatically. --color is a 6-char hex code (no leading #).\n'
+        ),
+        "labels": (
+            'Usage: vikunja labels [--search "..."]\n'
+            '\n'
+            '  List all labels you have access to. --search filters by name.\n'
+        ),
+        "label create": (
+            'Usage: vikunja label create --title "..." [--color "ff0000"] [--description "..."]\n'
+            '\n'
+            '  Create a new label. --color is a 6-char hex code without the leading #.\n'
+        ),
+    }
+
+
+    def print_command_help(command_path):
+        """Print help for a specific command path (e.g., 'task create')."""
+        text = COMMAND_HELP.get(command_path)
+        if text:
+            print(text)
+        else:
+            print(f"No help available for: {command_path}\n")
+            print(__doc__)
+
+
+    def _check_help(args, command_path):
+        """If args requests help, print command help and exit 0.
+
+        Matches either the literal 'help' as the first positional arg, or
+        '--help'/'-h' anywhere. Not matching bare 'help' mid-arg-list avoids
+        false positives when a user passes 'help' as a flag value, e.g.
+        `task create --title help`.
+        """
+        if args and args[0] == "help":
+            print_command_help(command_path)
+            sys.exit(0)
+        for a in args:
+            if a in ("--help", "-h"):
+                print_command_help(command_path)
+                sys.exit(0)
+
+
     def cmd_projects(args):
         """List all projects."""
+        _check_help(args, "projects")
         projects = _api("GET", "/projects")
         if not projects:
             print("No projects found.")
@@ -106,6 +227,7 @@ data:
 
     def cmd_project_create(args):
         """Create a new project."""
+        _check_help(args, "project create")
         flags, _ = _parse_args(args, {"title": "str", "description": "str"})
         title = flags.get("title")
         if not title:
@@ -120,6 +242,7 @@ data:
 
     def cmd_tasks(args):
         """List tasks in a project."""
+        _check_help(args, "tasks")
         if not args:
             print("Usage: vikunja tasks <project-id>", file=sys.stderr)
             sys.exit(1)
@@ -166,6 +289,7 @@ data:
 
     def cmd_task_create(args):
         """Create a task in a project."""
+        _check_help(args, "task create")
         flags, positional = _parse_args(args, {
             "title": "str", "description": "str", "due": "str",
             "priority": "str", "assignee": "str",
@@ -195,6 +319,7 @@ data:
 
     def cmd_task_update(args):
         """Update a task."""
+        _check_help(args, "task update")
         flags, positional = _parse_args(args, {
             "done": "bool", "title": "str", "description": "str",
             "due": "str", "priority": "str", "assignee": "str",
@@ -230,6 +355,7 @@ data:
 
     def cmd_task_assign(args):
         """Assign a user to a task."""
+        _check_help(args, "task assign")
         flags, positional = _parse_args(args, {"user": "str"})
         if not positional or "user" not in flags:
             print('Usage: vikunja task assign <task-id> --user <username>', file=sys.stderr)
@@ -239,6 +365,7 @@ data:
 
     def cmd_task_comment(args):
         """Add a comment to a task."""
+        _check_help(args, "task comment")
         flags, positional = _parse_args(args, {"body": "str"})
         if not positional or "body" not in flags:
             print('Usage: vikunja task comment <task-id> --body "..."', file=sys.stderr)
@@ -249,8 +376,16 @@ data:
 
 
     def main():
-        if len(sys.argv) < 2 or sys.argv[1] in ("help", "--help", "-h"):
+        if len(sys.argv) < 2:
             print(__doc__)
+            sys.exit(0)
+        if sys.argv[1] in ("help", "--help", "-h"):
+            # `vikunja help`              -> top-level
+            # `vikunja help task create`  -> per-command
+            if len(sys.argv) >= 3:
+                print_command_help(" ".join(sys.argv[2:]))
+            else:
+                print(__doc__)
             sys.exit(0)
 
         cmd = sys.argv[1]
