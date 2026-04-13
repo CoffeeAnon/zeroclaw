@@ -7,88 +7,266 @@ data:
   daily-meeting-summary.md: |
     ---
     name: daily-meeting-summary
-    version: 3.1.0
-    description: Fetches and summarizes daily meeting recordings from Speakr, distills into wiki
+    version: 4.0.0
+    description: >
+      Process Dan's Speakr meeting recordings into an executive summary,
+      Vikunja tasks, a memory digest, and wiki distillations. Use whenever
+      Dan mentions "today's meetings", "yesterday's standup", action items
+      from a call, decisions made in a meeting, or any reference to recent
+      meeting content — and for the daily cron that fires weekdays at 12:00
+      and 17:00 America/Vancouver.
     always: false
     ---
 
     # Daily Meeting Summary
 
-    Speakr (meetings.coffee-anon.com) is Dan's self-hosted meeting transcription app.
-    Tools: shell, file_read, file_write, memory_store, memory_recall, cron_list, cron_add, content_search.
-    Do not use Serena tools for meeting tasks. No curl available, use Python urllib.
+    Speakr (meetings.coffee-anon.com) is Dan's self-hosted meeting
+    transcription app. This skill turns its raw recordings into things Dan
+    actually uses: a 30-second executive summary, actionable Vikunja tasks,
+    and durable wiki entries for people, projects, and decisions.
 
-    ## Bootstrap
+    Tools: `shell`, `file_read`, `file_write`, `memory_store`,
+    `memory_recall`, `cron_list`, `cron_add`, `content_search`, `vikunja`.
+    Do not use Serena tools for meeting work — they're scoped to code
+    workspaces, not Dan's wiki. `curl` is not available; the shipped Python
+    scripts use `urllib`.
 
-    Check cron_list for speakr-daily-summary. If missing, create with cron_add:
-    name=speakr-daily-summary, schedule=0 12,17 * * 1-5, timezone=America/Vancouver, job_type=agent, session_target=isolated.
+    ## Why paths are always absolute
 
-    Cron prompt (use verbatim):
+    The wiki and meeting files live at `/data/workspace/wiki/` and
+    `/data/workspace/memory/`. Your cwd is `/data/.zeroclaw/workspace/`,
+    which is a *different directory* on the same PVC. Relative paths like
+    `meetings-2026-04-13.md` silently resolve into your cwd and miss the
+    real files. **Always use the absolute path** when reading or writing
+    meeting and wiki content. `workspace_only = false` in the security
+    policy is what makes absolute paths reachable — relative paths still
+    join against cwd and will land in the wrong tree.
+
+    ## Bootstrap (first run on a new Sam deployment)
+
+    Check `cron_list` for a job named `speakr-daily-summary`. If it's
+    missing, create it with `cron_add`:
+
+    - name: `speakr-daily-summary`
+    - schedule: `0 12,17 * * 1-5`
+    - timezone: `America/Vancouver`
+    - job_type: `agent`
+    - session_target: `isolated`
+    - prompt: the **Cron Prompt** block below, verbatim.
+
+    ### Cron Prompt
+
+    This is what lives in `cron_jobs.prompt` for `speakr-daily-summary`.
+    Keep it short. The real workflow is in this skill, not in the cron DB
+    — when the cron fires, this skill autoloads and Sam sees both. Any
+    duplication between the two is a source of drift and confusion, so
+    the cron prompt only names the skill and leaves the steps here.
+
     ```
-    You are in an isolated cron session. Do not call cron_run.
+    You are in an isolated cron session for speakr-daily-summary.
+    Run the daily-meeting-summary skill: steps 1 through 4, in order.
+    Do not call cron_run — you are already inside the cron job.
+    If step 1 reports zero meetings for today, stop after step 1 and
+    exit cleanly with a one-line status. Otherwise continue through
+    step 4.
+    ```
 
-    STEP 1: Run the aggregation script.
+    ## Workflow
+
+    ### Step 1 — Fetch and aggregate
+
+    Run the aggregation script directly from the skill directory. Do
+    **not** `cp` it anywhere first — the skill ConfigMap is the source of
+    truth, and copies in `/data/workspace/` rot quickly as the script
+    evolves.
+
+    ```
     shell: python3 /data/.zeroclaw/workspace/skills/daily-meeting-summary/speakr-fetch.py
-    This fetches today's meetings plus re-checks the past 3 days for updated annotations.
-    Writes to both wiki/sources/ (raw data layer) and memory/ (exec summary workflow).
-    Watch for "UPDATED sources" in output — means Dan annotated older meeting notes.
-
-    STEP 2: Build the executive summary.
-    Read meetings-YYYY-MM-DD.md with file_read.
-    Write meetings-exec-YYYY-MM-DD.md with file_write containing:
-    - Action items for Dan (with meeting context and deadlines)
-    - Action items others owe Dan (who, what, when)
-    - Top 3-5 key decisions and issues
-    Note any recordings still processing. Call out new recordings since last run.
-
-    STEP 2.5: Create Vikunja tasks.
-    For each concrete action item, run: vikunja task create 1 --title "action" --assignee dan --description "From [meeting]."
-    Add --due YYYY-MM-DD if a deadline was mentioned. Skip vague items.
-    Dedup: run vikunja tasks 1 first, skip if similar title exists.
-
-    STEP 3: Store memory.
-    memory_store key=meetings_digest_YYYY-MM-DD category=daily value="N meetings. Files: meetings-DATE.md, meetings-exec-DATE.md. Theme: [one sentence]."
-
-    STEP 4: Wiki distillation.
-    The script already wrote raw source files to wiki/sources/. These are the raw data layer.
-    Check the script output for two signals:
-    - Today's meetings: always distill these.
-    - "UPDATED sources" line: Dan annotated older meeting notes. Re-distill those too.
-
-    For each source file to distill (today's + any updated):
-    - Read the source file from wiki/sources/meetings-DATE.md.
-    - For each person who committed to an action item: update or create wiki/entities/PERSON.md.
-    - For each key decision made: update or create wiki/concepts/DECISION-SLUG.md.
-    - For each new project or initiative: update or create wiki/entities/PROJECT.md.
-    Only create pages for substantive items. Skip routine updates with no new information.
-    When re-distilling an updated source, check what changed (new annotations, revised summaries)
-    and update the relevant wiki pages with the new context.
-    Update wiki/index.md with any new pages. Append to wiki/log.md.
-    Follow the wiki-management skill for page format and cross-references.
     ```
 
-    ## On-Demand Usage
+    The script:
+    - Writes `/data/workspace/wiki/sources/meetings-YYYY-MM-DD.md` for
+      today — the primary input for step 2.
+    - Writes `/data/workspace/memory/meetings-YYYY-MM-DD.md` as a
+      duplicate for the exec-summary workflow.
+    - Re-fetches the past 3 days and reprints an
+      `UPDATED sources (Dan annotated): ...` line when Dan has added notes
+      to older meeting files. Capture that line — you need it in step 4.
 
-    When Dan asks about meetings:
-    1. memory_recall key meetings_digest_YYYY-MM-DD for quick check.
-    2. file_read meetings-exec-YYYY-MM-DD.md for the summary.
-    3. file_read meetings-YYYY-MM-DD.md for full per-meeting detail.
-    4. If no files exist, run: shell python3 /data/.zeroclaw/workspace/skills/daily-meeting-summary/speakr-fetch.py
-    5. For past dates, pass the date as argument: speakr-fetch.py YYYY-MM-DD
+    The script's stdout is your ground truth:
 
-    ## Full Transcript Lookup
+    - `Wrote N meetings to meetings-YYYY-MM-DD.md` — N is the count of
+      completed recordings for today. If N is 0, there's nothing to
+      summarize; exit cleanly after this step.
+    - `UPDATED sources (Dan annotated): meetings-A.md, meetings-B.md` —
+      these are the files to re-distill in step 4.
+    - Any warning about pending or failed recordings — surface in your
+      final reply so Dan knows what state things are in.
 
-    When Dan asks about specific transcript content:
-    1. shell: python3 /data/.zeroclaw/workspace/skills/daily-meeting-summary/speakr-transcript.py RECORDING_ID
-    2. Read header (first 10 lines) for metadata.
-    3. Use content_search to find relevant sections, then file_read with offset/limit.
-    4. Delete transcript file when done (they can be large).
-    Never load a full transcript into a single tool result.
+    ### Step 2 — Write the executive summary
 
-    ## API Reference
+    Read the primary source file using its absolute path:
 
-    Base: meetings.coffee-anon.com. Auth: Bearer SPEAKR_API_TOKEN.
-    Endpoints: /api/recordings?q=date:today, date:yesterday, date:YYYY-MM-DD, date:thisweek, date_from:X&date_to:Y. Add per_page=100.
+    ```
+    file_read /data/workspace/wiki/sources/meetings-YYYY-MM-DD.md
+    ```
+
+    Write the exec summary to its absolute path:
+
+    ```
+    file_write /data/workspace/memory/meetings-exec-YYYY-MM-DD.md
+    ```
+
+    Use this exact template:
+
+    ```markdown
+    # Meetings — YYYY-MM-DD
+
+    ## Action items for Dan
+    - **<action>** — from **<meeting title>**. Context: <1-2 lines>. Due: <date or "no deadline given">.
+
+    ## Action items others owe Dan
+    - **<name>** owes **<action>** — from **<meeting title>**. Due: <date or "no deadline given">.
+
+    ## Key decisions and issues
+    - <one-line decision or issue> — from **<meeting title>**.
+
+    ## Recording status
+    - New recordings since last run: <titles, or "none">.
+    - Recordings still processing: <titles, or "none">.
+    ```
+
+    If a section has no entries, write `- None today.` rather than
+    omitting the section. Dan scans for these headers and an empty
+    section is a signal; a missing section is a hole.
+
+    ### Step 2.5 — Create Vikunja tasks
+
+    For each **concrete** action item in Dan's bucket from step 2, create
+    a Vikunja task. Skip vague items ("look into X", "think about Y") —
+    Vikunja is for things with a verb, a noun, and ideally a deadline.
+
+    First list existing tasks for dedup:
+
+    ```
+    shell: vikunja tasks 1
+    ```
+
+    Then for each new item:
+
+    ```
+    shell: vikunja task create 1 --title "<short action>" --assignee dan --description "From <meeting title>."
+    ```
+
+    Add `--due YYYY-MM-DD` when the meeting specified a deadline. Skip
+    any item whose title closely matches an existing open task. If the
+    Vikunja CLI errors on a single task, log the title and keep going —
+    do not block step 3 or step 4 on a Vikunja failure.
+
+    ### Step 3 — Store the memory digest
+
+    Short pointer, not content. The wiki is the durable store; memory is
+    just a breadcrumb you can recall later:
+
+    ```
+    memory_store key=meetings_digest_YYYY-MM-DD category=daily value="N meetings. Files: /data/workspace/wiki/sources/meetings-YYYY-MM-DD.md, /data/workspace/memory/meetings-exec-YYYY-MM-DD.md. Theme: <one sentence>."
+    ```
+
+    ### Step 4 — Wiki distillation
+
+    The raw source files in `/data/workspace/wiki/sources/` are the
+    immutable data layer. Step 4 turns them into durable wiki pages for
+    people, projects, and decisions.
+
+    **Delegate the page format to the `wiki-management` skill** — that's
+    where the directory structure, page template, and cross-reference
+    rules live. This step only tells you *which* files to distill.
+
+    Distill:
+
+    1. Today's file: `/data/workspace/wiki/sources/meetings-YYYY-MM-DD.md`
+       — always.
+    2. Any file named in the script's `UPDATED sources` output — Dan has
+       added annotations that may contain new decisions or action items.
+
+    For each file, follow the `wiki-management` skill's Ingest operation:
+
+    - **Entities** (`/data/workspace/wiki/entities/`): people who
+      committed to an action item, or projects mentioned for the first
+      time.
+    - **Concepts** (`/data/workspace/wiki/concepts/`): key decisions,
+      technical choices, or patterns that came up.
+    - **Syntheses** (`/data/workspace/wiki/syntheses/`): only when a
+      meeting links multiple existing entities in a new way.
+
+    Be conservative. Not every meeting deserves a new wiki page. If the
+    content is routine status updates with no new commitments or
+    decisions, finish step 4 after reading the source file and exit
+    without writing anything. Writing a trivial page is worse than
+    writing none — it dilutes the wiki.
+
+    Update `/data/workspace/wiki/index.md` and append to
+    `/data/workspace/wiki/log.md` for anything you create or materially
+    change.
+
+    ## On-demand usage
+
+    When Dan asks about a specific day's meetings outside the cron:
+
+    1. `memory_recall key=meetings_digest_YYYY-MM-DD` for a quick
+       pointer.
+    2. `file_read /data/workspace/memory/meetings-exec-YYYY-MM-DD.md` for
+       the summary.
+    3. `file_read /data/workspace/wiki/sources/meetings-YYYY-MM-DD.md`
+       for the full per-meeting detail.
+    4. If the files don't exist for that date, run
+       `shell: python3 /data/.zeroclaw/workspace/skills/daily-meeting-summary/speakr-fetch.py YYYY-MM-DD`
+       then rerun steps 2–3.
+
+    ## Full transcript lookup
+
+    When Dan asks about specific transcript content (quotes, exact
+    wording):
+
+    ```
+    shell: python3 /data/.zeroclaw/workspace/skills/daily-meeting-summary/speakr-transcript.py RECORDING_ID
+    ```
+
+    The script writes to
+    `/data/workspace/memory/transcript-RECORDING_ID.md`.
+
+    1. `file_read /data/workspace/memory/transcript-RECORDING_ID.md` with
+       `limit=10` to read the header for metadata.
+    2. Use `content_search` over
+       `/data/workspace/memory/transcript-RECORDING_ID.md` to find
+       relevant sections, then `file_read` with explicit offset/limit —
+       never load a full transcript into a single tool call, they
+       routinely run tens of thousands of tokens.
+    3. `shell: rm /data/workspace/memory/transcript-RECORDING_ID.md` when
+       you're done. These are large and ephemeral.
+
+    ## API reference
+
+    Base: `meetings.coffee-anon.com`. Auth: `Bearer $SPEAKR_API_TOKEN`.
+    Query: `/api/recordings?q=date:today` or
+    `date:yesterday`, `date:YYYY-MM-DD`, `date:thisweek`,
+    `date_from:X&date_to:Y`. Add `per_page=100` to avoid pagination.
+
+    ## Failure modes
+
+    - `SPEAKR_API_TOKEN` missing → the script raises `KeyError` before
+      any API call. This means `shell_env_passthrough` dropped the
+      token. Surface to Dan and stop.
+    - Speakr HTTP 5xx or connection error → retry the script once; if it
+      fails again, surface to Dan and stop.
+    - Script prints `Wrote 0 meetings` → exit cleanly after step 1. Not
+      an error; Dan may simply have had no meetings that day.
+    - Vikunja CLI error on a specific task → log the title, continue
+      with the rest of step 2.5. Do not block step 3 or step 4.
+    - `file_read` returns "not found" on the source file → you almost
+      certainly used a relative path. Re-read the "Why paths are always
+      absolute" section and retry with the full `/data/workspace/...`
+      path.
 
   speakr-fetch.py: |
     #!/usr/bin/env python3
