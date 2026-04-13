@@ -375,6 +375,69 @@ data:
         print(f"Comment added to task #{task_id} (comment id: {result.get('id', '?')})")
 
 
+    def _print_task_detail(task, comments):
+        """Render a task dict as a multi-line detail view, including comments."""
+        tid = task.get("id", "?")
+        title = task.get("title", "Untitled")
+        done = "DONE" if task.get("done") else "TODO"
+        priority = task.get("priority", 0)
+        pri_str = f"P{priority}" if priority else "(none)"
+        due = task.get("due_date", "")
+        due_str = due[:10] if due and due != "0001-01-01T00:00:00Z" else "(none)"
+        labels = task.get("labels") or []
+        label_str = ", ".join(l.get("title", "?") for l in labels) or "(none)"
+        assignees = task.get("assignees") or []
+        assign_str = ", ".join(f"@{a.get('username','?')}" for a in assignees) or "(none)"
+        desc = task.get("description", "") or ""
+        print(f"#{tid} [{done}] {title}")
+        print(f"  priority:  {pri_str}")
+        print(f"  due:       {due_str}")
+        print(f"  labels:    {label_str}")
+        print(f"  assignees: {assign_str}")
+        if desc:
+            print(f"  description:")
+            for line in desc.splitlines():
+                print(f"    {line}")
+        if comments:
+            print(f"  comments ({len(comments)}):")
+            for c in comments:
+                author = (c.get("author") or {}).get("username", "?")
+                created = (c.get("created") or "")[:10]
+                body = (c.get("comment") or "").strip()
+                header = f"    - @{author}"
+                if created:
+                    header += f" ({created})"
+                print(header)
+                for line in body.splitlines() or [""]:
+                    print(f"        {line}")
+        else:
+            print(f"  comments:  (none)")
+
+
+    def cmd_task_show(args):
+        """Show full details for a single task, including comments."""
+        _check_help(args, "task show")
+        if not args:
+            print_command_help("task show")
+            sys.exit(1)
+        task_id = args[0]
+        task = _api("GET", f"/tasks/{task_id}")
+        # Comments are on a separate endpoint; an empty list is a valid response.
+        comments = _api("GET", f"/tasks/{task_id}/comments") or []
+        _print_task_detail(task, comments)
+
+
+    def cmd_task_delete(args):
+        """Delete a task permanently."""
+        _check_help(args, "task delete")
+        if not args:
+            print_command_help("task delete")
+            sys.exit(1)
+        task_id = args[0]
+        _api("DELETE", f"/tasks/{task_id}")
+        print(f"Task #{task_id} deleted")
+
+
     def main():
         if len(sys.argv) < 2:
             print(__doc__)
@@ -418,6 +481,10 @@ data:
                 cmd_task_assign(rest[1:])
             elif subcmd == "comment":
                 cmd_task_comment(rest[1:])
+            elif subcmd == "show":
+                cmd_task_show(rest[1:])
+            elif subcmd == "delete":
+                cmd_task_delete(rest[1:])
             else:
                 print(f"Unknown task subcommand: {subcmd}", file=sys.stderr)
                 print(__doc__)
