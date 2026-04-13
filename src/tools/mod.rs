@@ -562,24 +562,8 @@ pub fn all_tools_with_runtime(
             let trimmed_value = value.trim();
             (!trimmed_value.is_empty()).then(|| trimmed_value.to_owned())
         });
-        let provider_runtime_options = crate::providers::ProviderRuntimeOptions {
-            auth_profile_override: None,
-            provider_api_url: root_config.api_url.clone(),
-            provider_transport: root_config.effective_provider_transport(),
-            zeroclaw_dir: root_config
-                .config_path
-                .parent()
-                .map(std::path::PathBuf::from),
-            secrets_encrypt: root_config.secrets.encrypt,
-            reasoning_enabled: root_config.runtime.reasoning_enabled,
-            reasoning_level: root_config.effective_provider_reasoning_level(),
-            custom_provider_api_mode: root_config
-                .provider_api
-                .map(|mode| mode.as_compatible_mode()),
-            custom_provider_supports_responses_fallback: root_config.supports_responses_fallback,
-            max_tokens_override: None,
-            model_support_vision: root_config.model_support_vision,
-        };
+        let provider_runtime_options =
+            crate::providers::provider_runtime_options_from_config(root_config);
         let runtime_config_path = Some(root_config.config_path.clone());
         let parent_tools = Arc::new(tool_arcs.clone());
         let load_tracker = AgentLoadTracker::new();

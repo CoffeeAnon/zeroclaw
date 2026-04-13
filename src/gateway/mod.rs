@@ -410,19 +410,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         config.api_key.as_deref(),
         config.api_url.as_deref(),
         &config.reliability,
-        &providers::ProviderRuntimeOptions {
-            auth_profile_override: None,
-            provider_api_url: config.api_url.clone(),
-            provider_transport: config.effective_provider_transport(),
-            zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
-            secrets_encrypt: config.secrets.encrypt,
-            reasoning_enabled: config.runtime.reasoning_enabled,
-            reasoning_level: config.effective_provider_reasoning_level(),
-            custom_provider_api_mode: config.provider_api.map(|mode| mode.as_compatible_mode()),
-            custom_provider_supports_responses_fallback: config.supports_responses_fallback,
-            max_tokens_override: None,
-            model_support_vision: config.model_support_vision,
-        },
+        &providers::provider_runtime_options_from_config(&config),
     )?);
     let model = config
         .default_model
