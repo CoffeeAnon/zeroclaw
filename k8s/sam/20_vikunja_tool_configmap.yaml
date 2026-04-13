@@ -28,6 +28,7 @@ data:
     import json
     import os
     import sys
+    import urllib.parse
     import urllib.request
     import urllib.error
 
@@ -438,6 +439,117 @@ data:
         print(f"Task #{task_id} deleted")
 
 
+    def _find_label_by_name(name):
+        """Return the label dict matching `name` exactly, or None."""
+        q = urllib.parse.quote(name)
+        results = _api("GET", f"/labels?s={q}")
+        for l in results or []:
+            if l.get("title") == name:
+                return l
+        return None
+
+
+    def cmd_labels(args):
+        """List all labels."""
+        _check_help(args, "labels")
+        flags, _ = _parse_args(args, {"search": "str"})
+        path = "/labels"
+        if "search" in flags:
+            path += f"?s={urllib.parse.quote(flags['search'])}"
+        labels = _api("GET", path)
+        if not labels:
+            print("No labels found.")
+            return
+        for l in labels:
+            lid = l.get("id", "?")
+            title = l.get("title", "Untitled")
+            color = l.get("hex_color") or ""
+            color_str = f" #{color}" if color else ""
+            desc = l.get("description", "") or ""
+            desc_str = f" — {desc[:60]}" if desc else ""
+            print(f"  #{lid}: {title}{color_str}{desc_str}")
+
+
+    def cmd_label_create(args):
+        """Create a new label."""
+        _check_help(args, "label create")
+        flags, _ = _parse_args(args, {"title": "str", "color": "str", "description": "str"})
+        title = flags.get("title")
+        if not title:
+            print_command_help("label create")
+            sys.exit(1)
+        data = {"title": title}
+        if "color" in flags:
+            data["hex_color"] = flags["color"].lstrip("#")
+        if "description" in flags:
+            data["description"] = flags["description"]
+        result = _api("PUT", "/labels", data)
+        print(f"Label #{result.get('id', '?')} created: {result.get('title', title)}")
+
+
+    def cmd_task_label(args):
+        """Manage labels on a task."""
+        _check_help(args, "task label")
+        flags, positional = _parse_args(args, {
+            "add": "str",
+            "remove": "str",
+            "list": "bool",
+            "create-missing": "bool",
+            "color": "str",
+        })
+        if not positional:
+            print_command_help("task label")
+            sys.exit(1)
+        task_id = positional[0]
+
+        if flags.get("list"):
+            task = _api("GET", f"/tasks/{task_id}")
+            labels = task.get("labels") or []
+            if not labels:
+                print(f"Task #{task_id} has no labels.")
+                return
+            for l in labels:
+                lid = l.get("id", "?")
+                title = l.get("title", "Untitled")
+                color = l.get("hex_color") or ""
+                color_str = f" #{color}" if color else ""
+                print(f"  #{lid}: {title}{color_str}")
+            return
+
+        if "add" in flags:
+            name = flags["add"]
+            label = _find_label_by_name(name)
+            if not label:
+                if flags.get("create-missing"):
+                    create_data = {"title": name}
+                    if "color" in flags:
+                        create_data["hex_color"] = flags["color"].lstrip("#")
+                    label = _api("PUT", "/labels", create_data)
+                    print(f"  Created label #{label.get('id', '?')}: {name}")
+                else:
+                    print(f"ERROR: Label '{name}' not found. Use --create-missing to auto-create.",
+                          file=sys.stderr)
+                    sys.exit(1)
+            _api("PUT", f"/tasks/{task_id}/labels", {"label_id": label["id"]})
+            print(f"  Attached label '{name}' (#{label['id']}) to task #{task_id}")
+            return
+
+        if "remove" in flags:
+            name = flags["remove"]
+            task = _api("GET", f"/tasks/{task_id}")
+            task_labels = task.get("labels") or []
+            match = next((l for l in task_labels if l.get("title") == name), None)
+            if not match:
+                print(f"ERROR: Task #{task_id} does not have label '{name}'.", file=sys.stderr)
+                sys.exit(1)
+            _api("DELETE", f"/tasks/{task_id}/labels/{match['id']}")
+            print(f"  Detached label '{name}' (#{match['id']}) from task #{task_id}")
+            return
+
+        print_command_help("task label")
+        sys.exit(1)
+
+
     def main():
         if len(sys.argv) < 2:
             print(__doc__)
@@ -468,6 +580,18 @@ data:
                 sys.exit(1)
         elif cmd == "tasks":
             cmd_tasks(rest)
+        elif cmd == "labels":
+            cmd_labels(rest)
+        elif cmd == "label" and rest:
+            if rest[0] in ("help", "--help", "-h"):
+                print_command_help("label create")
+                sys.exit(0)
+            elif rest[0] == "create":
+                cmd_label_create(rest[1:])
+            else:
+                print(f"Unknown label subcommand: {rest[0]}", file=sys.stderr)
+                print(__doc__)
+                sys.exit(1)
         elif cmd == "task" and rest:
             if rest[0] in ("help", "--help", "-h"):
                 print(__doc__)
@@ -485,6 +609,8 @@ data:
                 cmd_task_show(rest[1:])
             elif subcmd == "delete":
                 cmd_task_delete(rest[1:])
+            elif subcmd == "label":
+                cmd_task_label(rest[1:])
             else:
                 print(f"Unknown task subcommand: {subcmd}", file=sys.stderr)
                 print(__doc__)
