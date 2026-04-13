@@ -200,6 +200,36 @@ data:
             '\n'
             '  Create a new label. --color is a 6-char hex code without the leading #.\n'
         ),
+        "task": (
+            'Usage: vikunja task <subcommand> ...\n'
+            '\n'
+            'Subcommands:\n'
+            '  create   Create a task\n'
+            '  update   Update a task\n'
+            '  show     Show full task details\n'
+            '  delete   Delete a task\n'
+            '  assign   Assign a user\n'
+            '  comment  Add a comment\n'
+            '  label    Manage labels on a task\n'
+            '\n'
+            'Run: vikunja help task <subcommand>   for per-subcommand usage\n'
+        ),
+        "project": (
+            'Usage: vikunja project <subcommand> ...\n'
+            '\n'
+            'Subcommands:\n'
+            '  create   Create a project\n'
+            '\n'
+            'Run: vikunja help project <subcommand>   for per-subcommand usage\n'
+        ),
+        "label": (
+            'Usage: vikunja label <subcommand> ...\n'
+            '\n'
+            'Subcommands:\n'
+            '  create   Create a new label\n'
+            '\n'
+            'Run: vikunja help label <subcommand>   for per-subcommand usage\n'
+        ),
     }
 
 
@@ -694,7 +724,10 @@ data:
 
         if cmd == "projects":
             cmd_projects(rest)
-        elif cmd == "project" and rest:
+        elif cmd == "project":
+            if not rest:
+                print_command_help("project")
+                sys.exit(0)
             if rest[0] in ("help", "--help", "-h"):
                 print_command_help("project create")
                 sys.exit(0)
@@ -711,7 +744,10 @@ data:
                 cmd_tasks(rest)
         elif cmd == "labels":
             cmd_labels(rest)
-        elif cmd == "label" and rest:
+        elif cmd == "label":
+            if not rest:
+                print_command_help("label")
+                sys.exit(0)
             if rest[0] in ("help", "--help", "-h"):
                 print_command_help("label create")
                 sys.exit(0)
@@ -723,7 +759,7 @@ data:
                 sys.exit(1)
         elif cmd == "task" and rest:
             if rest[0] in ("help", "--help", "-h"):
-                print(__doc__)
+                print_command_help("task")
                 sys.exit(0)
             subcmd = rest[0]
             if subcmd == "create":
