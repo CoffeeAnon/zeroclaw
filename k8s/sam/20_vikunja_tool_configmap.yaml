@@ -502,6 +502,12 @@ data:
             sys.exit(1)
         task_id = positional[0]
 
+        # Exactly one operation flag must be present.
+        ops = sum([bool(flags.get("list")), "add" in flags, "remove" in flags])
+        if ops > 1:
+            print("ERROR: --list, --add, and --remove are mutually exclusive.", file=sys.stderr)
+            sys.exit(1)
+
         if flags.get("list"):
             task = _api("GET", f"/tasks/{task_id}")
             labels = task.get("labels") or []
