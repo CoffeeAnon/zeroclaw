@@ -7,7 +7,7 @@ data:
   daily-meeting-summary.md: |
     ---
     name: daily-meeting-summary
-    version: 4.1.0
+    version: 4.2.0
     description: >
       Process Dan's Speakr meeting recordings into an executive summary,
       Vikunja tasks, a memory digest, and wiki distillations. Use whenever
@@ -169,22 +169,55 @@ data:
     a Vikunja task. Skip vague items ("look into X", "think about Y") —
     Vikunja is for things with a verb, a noun, and ideally a deadline.
 
-    First list existing tasks for dedup:
+    **The `vikunja-project-manager` skill has the full CLI reference and
+    gotchas** — read it if you need the bigger picture. This step only
+    specifies the meeting-specific pieces.
+
+    First pull existing tasks as JSON so you can do real dedup against
+    structured data instead of eyeballing text:
 
     ```
-    shell: vikunja tasks 1
+    shell: vikunja tasks 1 --format json
     ```
 
-    Then for each new item:
+    Walk the JSON and match each new item's title against every existing
+    open task's `title`. If the titles are essentially the same, skip
+    the new item. For close-but-not-identical matches (for example
+    "Draft the X proposal" vs "Write proposal for X"), run
+    `vikunja task show <id>` on the existing task to read its
+    description and comments — if those already capture the new
+    commitment, skip; otherwise create the new task.
+
+    For each new item, create it with:
+
+    - `--priority 4` if the meeting gave a deadline within the next
+      7 days, otherwise `--priority 3`. Meeting action items have
+      provenance and deadlines, so they shouldn't land at priority 0
+      next to generic backlog items.
+    - `--description "From <meeting title>."` so every task traces
+      back to its source.
+    - `--assignee dan`.
+    - `--due YYYY-MM-DD` when a deadline was given.
 
     ```
-    shell: vikunja task create 1 --title "<short action>" --assignee dan --description "From <meeting title>."
+    shell: vikunja task create 1 --title "<short action>" --assignee dan --priority 3 --description "From <meeting title>." [--due YYYY-MM-DD]
     ```
 
-    Add `--due YYYY-MM-DD` when the meeting specified a deadline. Skip
-    any item whose title closely matches an existing open task. If the
-    Vikunja CLI errors on a single task, log the title and keep going —
-    do not block step 3 or step 4 on a Vikunja failure.
+    The output is `Task #<id> created: ...`. Grab that `<id>` and attach
+    a visible label so Dan can see at a glance which tasks came from a
+    meeting:
+
+    ```
+    shell: vikunja task label <id> --add "from-meeting" --create-missing --color 0088ff
+    ```
+
+    `--create-missing` is idempotent — the label is created the first
+    time any task uses it and every subsequent call just attaches the
+    existing one.
+
+    If the Vikunja CLI errors on a single task, log the title and keep
+    going — do not block step 3 or step 4 on a Vikunja failure. Vikunja
+    is a nice-to-have output, not the workflow's core contract.
 
     ### Step 3 — Store the memory digest
 
