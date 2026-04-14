@@ -64,8 +64,8 @@ data:
   vikunja-project-manager.md: |
     ---
     name: vikunja-project-manager
-    version: 2.0.0
-    description: Manage project status, tasks, priorities, labels, and ordering via the vikunja CLI. Use whenever Dan asks about project status, task tracking, TODO lists, prioritizing a list, removing duplicates, or wants to communicate progress on work items.
+    version: 2.1.0
+    description: Manage project status, tasks, priorities, labels, and ordering via the vikunja CLI. Use this whenever Dan mentions todo lists, task tracking, project status, prioritizing, reordering, removing duplicates, backlogs, roadmaps, what's on his plate, what to work on next, or wants to record or report progress on work items — even if he doesn't explicitly name Vikunja.
     ---
 
     # Vikunja Project Manager
@@ -144,10 +144,13 @@ data:
 
     1. `vikunja tasks <project-id> --format json` — get machine-readable task data.
     2. Scan the JSON for tasks with the same or near-identical `title`.
-    3. For each duplicate, pick the one to keep (usually the oldest by `id`
-       or the one with more context — comments, labels, assignees).
-    4. For each duplicate to remove, `vikunja task delete <id>`.
-    5. Verify with `vikunja tasks <project-id>`.
+    3. For borderline cases, `vikunja task show <id>` on each candidate to
+       compare descriptions, comments, labels, and assignees. The one with
+       more context is usually the one to keep.
+    4. For each duplicate, pick the one to keep (usually the oldest by `id`
+       or the one with more context after inspection).
+    5. For each duplicate to remove, `vikunja task delete <id>`.
+    6. Verify with `vikunja tasks <project-id>`.
 
     ## Workflow: starting a new initiative
 
@@ -158,13 +161,30 @@ data:
        `vikunja tasks reorder <id> --order "..."`
     4. Report the project ID and task list to Dan.
 
-    ## Tips
+    ## Gotchas
+
+    - **`task update` zeroes fields you don't pass.** Vikunja's update
+      endpoint is last-write-wins, not a partial patch. If you run
+      `task update <id> --description "..."` on a task with priority 5,
+      the priority becomes 0. Always pass `--priority N` when updating
+      a task that already has a priority, even if you're only changing
+      something else. When in doubt, `task show <id>` first to see what's
+      already set.
+    - **`--sort priority` is display-only.** It re-renders the list output
+      but doesn't change the stored order. Use `tasks reorder` when you
+      want the new order to persist in the UI.
+    - **`tasks reorder` resequences the whole view, not just the IDs you
+      pass.** Tasks you don't mention still get new positions (in their
+      current display order, after the explicit block). If someone already
+      manually arranged the tail of the list, that manual order is
+      overwritten — so don't run `tasks reorder` unless you're committing
+      to a full resequence.
+
+    ## Style
 
     - `--priority` is 1 (lowest) through 5 (highest).
-    - `--sort priority` is read-only — it changes the display of `vikunja tasks`
-      but does not change the stored order. Use `tasks reorder` to persist.
     - `task show` is your detail view — use it whenever a list line isn't enough.
-    - `--format json` is the right tool for programmatic reasoning; the default
-      text format is for quick human-facing status reports.
-    - Keep task titles short and actionable ("Deploy vikunja postgres", not
-      "We need to set up the database").
+    - `--format json` is the right tool for programmatic reasoning; the
+      default text format is for quick human-facing status reports.
+    - Keep task titles short and actionable ("Deploy vikunja postgres",
+      not "We need to set up the database").
