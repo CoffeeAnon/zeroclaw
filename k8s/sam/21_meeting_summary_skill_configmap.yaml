@@ -112,21 +112,46 @@ data:
       today — the primary input for step 2.
     - Writes `/data/workspace/memory/meetings-YYYY-MM-DD.md` as a
       duplicate for the exec-summary workflow.
-    - Re-fetches the past 3 days and reprints an
-      `UPDATED sources (Dan annotated): ...` line when Dan has added notes
-      to older meeting files. Capture that line — you need it in step 4.
+    - Re-fetches the past 3 days and classifies any file whose content
+      changed since the previous run into two flavors (see below).
 
     The script's stdout is your ground truth:
 
-    - `Wrote N meetings to meetings-YYYY-MM-DD.md` — N is the count of
-      completed recordings for today. If N is 0, there's nothing to
-      summarize; exit cleanly after this step.
-    - `UPDATED sources (Dan annotated): meetings-A.md, meetings-B.md` —
-      these are the files to re-distill in step 4.
+    - `Wrote N meetings to meetings-YYYY-MM-DD.md. [K failed to fetch.]
+      [M still processing.] [G summaries flagged as possibly malformed.]
+      [New since last run: ...]` — a single period-separated line. N is
+      the count of completed recordings for today; the other fields only
+      appear when they apply. If N is 0 AND the script did not also
+      print a `CHANGED sources (late transcripts)` line, there is
+      nothing to process — exit cleanly after this step. If G is
+      non-zero, surface it in your final reply so Dan knows to manually
+      re-summarize those recordings.
+    - `CHANGED sources (late transcripts): meetings-YYYY-MM-DD.md, ...`
+      — these are prior days whose transcripts were not yet available at
+      the previous cron run (the previous file was the
+      `No completed meeting recordings` placeholder) but have since
+      landed. Their action items were NEVER captured by step 2.5. You
+      must run step 2.5 on each of these files in addition to today's
+      primary file. Prefix each Vikunja task description with
+      `(late backfill from YYYY-MM-DD)` so Dan can tell real-time tasks
+      from recovered ones.
+    - `CHANGED sources (annotated): meetings-YYYY-MM-DD.md, ...` — these
+      are prior days that already had real meeting content on the
+      previous run and whose file content now differs. Treat as Dan's
+      annotations. Re-distill in step 4 only; do NOT re-run step 2.5
+      (original action items were already captured on the first pass).
     - Any warning about pending or failed recordings — surface in your
-      final reply so Dan knows what state things are in.
+      final reply so Dan knows what state things are in. (The garbage
+      summary count is part of the first line above; no separate
+      output bullet.)
 
     ### Step 2 — Write the executive summary
+
+    Step 2 only covers today's primary-date file. If step 1 reported zero
+    meetings for today but named files in `CHANGED sources (late
+    transcripts)`, skip step 2 entirely — do not write an exec summary
+    for a prior date (Dan does not re-read yesterday's end-of-day
+    recap). Jump straight to step 2.5 for the backfill files.
 
     Read the primary source file using its absolute path:
 
@@ -165,59 +190,153 @@ data:
 
     ### Step 2.5 — Create Vikunja tasks
 
-    For each **concrete** action item in Dan's bucket from step 2, create
-    a Vikunja task. Skip vague items ("look into X", "think about Y") —
-    Vikunja is for things with a verb, a noun, and ideally a deadline.
+    Step 2.5 has three phases: **gather candidates** → **dedup against
+    existing** → **create in one batch**. Keep them separate in your
+    head — they run against the same pool of items and only differ in
+    what they do with them.
 
-    **The `vikunja-project-manager` skill has the full CLI reference and
-    gotchas** — read it if you need the bigger picture. This step only
-    specifies the meeting-specific pieces.
+    **The `vikunja-project-manager` skill has the full CLI reference
+    and gotchas** — read it if you need the bigger picture. This step
+    only specifies the meeting-specific pieces.
 
-    First pull existing tasks as JSON so you can do real dedup against
-    structured data instead of eyeballing text:
+    #### Phase 1 — Gather candidates
+
+    Start with every **concrete** action item in Dan's bucket from step
+    2 (today's primary date). Skip vague items ("look into X", "think
+    about Y") — Vikunja is for things with a verb, a noun, and ideally
+    a deadline.
+
+    Then add any file named in a `CHANGED sources (late transcripts)`
+    line from step 1. Those meetings never went through step 2 / step
+    2.5 on the previous cron run because the transcripts had not yet
+    landed, so their action items are hiding. For those backfill files:
+
+    - Extract action items directly from the per-meeting `## Action
+      Items` sections of
+      `/data/workspace/wiki/sources/meetings-YYYY-MM-DD.md` (there is
+      no exec summary file to read — you do not write one for backfill
+      days, see step 2).
+    - Tag each as a backfill item so phase 3 can prefix the description
+      correctly.
+    - While reading a source file, if a recording's `### Summary` block
+      starts with `*Warning: summary appears malformed`, drop that
+      recording entirely — no Vikunja task, no wiki entry — and log the
+      recording ID to surface to Dan at the end.
+
+    Ignore any `CHANGED sources (annotated)` files here. Their original
+    action items were already captured by step 2.5 on the day they
+    first landed; the annotations themselves go into step 4 for wiki
+    distillation, not into Vikunja.
+
+    #### Phase 2 — Dedup against existing tasks
+
+    Pull existing tasks as JSON so you can dedup against structured
+    data instead of eyeballing text:
 
     ```
     shell: vikunja tasks 1 --format json
     ```
 
-    Walk the JSON and match each new item's title against every existing
-    open task's `title`. If the titles are essentially the same, skip
-    the new item. For close-but-not-identical matches (for example
-    "Draft the X proposal" vs "Write proposal for X"), run
+    **Filter the result on `done == false` first** — the CLI returns
+    both open and completed tasks, and you do not want to skip creating
+    a new task just because Dan completed an identically-named one last
+    month.
+
+    Do the dedup pass **once**, against the union of today's candidate
+    items and any late-backfill candidate items from phase 1. Walk the
+    filtered JSON and match each new item's title against every
+    existing open task's `title`. If the titles are essentially the
+    same, skip the new item. For close-but-not-identical matches (for
+    example "Draft the X proposal" vs "Write proposal for X"), run
     `vikunja task show <id>` on the existing task to read its
     description and comments — if those already capture the new
-    commitment, skip; otherwise create the new task.
+    commitment, skip; otherwise keep it as a candidate.
 
-    For each new item, create it with:
+    #### Phase 3 — Create in one batch
 
-    - `--priority 4` if the meeting gave a deadline within the next
-      7 days, otherwise `--priority 3`. Meeting action items have
-      provenance and deadlines, so they shouldn't land at priority 0
-      next to generic backlog items.
-    - `--description "From <meeting title>."` so every task traces
-      back to its source.
-    - `--assignee dan`.
-    - `--due YYYY-MM-DD` when a deadline was given.
+    Build a single JSON array with one object per surviving candidate,
+    then hand it to `vikunja task batch-create` in one shot. Use
+    **one** batch call for the whole review — same-day items and
+    late-backfill items go in the same array. A typical review
+    produces around 5 tasks, and collapsing ~5 create calls plus ~5
+    label calls into one CLI invocation matters under cron load:
+    every separate `shell:` call consumes a provider HTTP timeout
+    window, and Sam has historically timed out mid-batch on Tier-0.5
+    traffic when the calls stack up.
+
+    Each task object should set:
+
+    - `title`: the short action itself (verb + noun, no provenance —
+      provenance lives in `description`).
+    - `priority`: `4` if the meeting gave a deadline within the next 7
+      days, otherwise `3`. Meeting action items have deadlines and
+      provenance, so they shouldn't land at priority 0 next to generic
+      backlog items.
+    - `due`: `"YYYY-MM-DD"` when a deadline was given; omit otherwise.
+    - `description`: `"From <meeting title>."` for same-day items, or
+      `"(late backfill from YYYY-MM-DD) From <meeting title>."` for
+      late-transcripts items. Keep the wording flat and do not wrap
+      the meeting title in extra quotes — the CLI passes the string
+      through JSON, not shell, so apostrophes and colons inside the
+      title are already safe. Dan uses the description to trace every
+      task back to its source.
+    - `labels`: `["from-meeting"]`. The CLI auto-creates the label on
+      first use and just attaches it thereafter — no separate
+      `task label` call needed.
+
+    Write the array to a workspace tmp file and pass it with `--file`.
+    Passing multi-item JSON through `--stdin` heredocs works in a
+    pinch but the shell-escaping is brittle when descriptions contain
+    quotes or apostrophes; the file path avoids that entirely.
 
     ```
-    shell: vikunja task create 1 --title "<short action>" --assignee dan --priority 3 --description "From <meeting title>." [--due YYYY-MM-DD]
+    file_write /data/.zeroclaw/workspace/tasks-YYYY-MM-DD.json
     ```
 
-    The output is `Task #<id> created: ...`. Grab that `<id>` and attach
-    a visible label so Dan can see at a glance which tasks came from a
-    meeting:
+    with contents like:
+
+    ```json
+    [
+      {
+        "title": "Reschedule meetings around Minnesota travel",
+        "priority": 4,
+        "due": "2026-04-14",
+        "description": "From Scrum of scrums.",
+        "labels": ["from-meeting"]
+      },
+      {
+        "title": "Draft agent interaction models doc",
+        "priority": 3,
+        "description": "(late backfill from 2026-04-08) From Caspar 1:1.",
+        "labels": ["from-meeting"]
+      }
+    ]
+    ```
+
+    Then run the batch:
 
     ```
-    shell: vikunja task label <id> --add "from-meeting" --create-missing --color 0088ff
+    shell: vikunja task batch-create 1 --assignee dan --file /data/.zeroclaw/workspace/tasks-YYYY-MM-DD.json
     ```
 
-    `--create-missing` is idempotent — the label is created the first
-    time any task uses it and every subsequent call just attaches the
-    existing one.
+    Output is one `Task #<id> created: ...` line per item, followed by
+    a trailing `Batch: C created, S skipped, F failed` summary. When
+    F > 0 the command exits 1 — this is intentional so cron-level
+    observability picks it up, but you should still continue into step
+    3 and step 4 (Vikunja is a nice-to-have output, not the workflow's
+    core contract) and surface the failed titles to Dan in your final
+    reply.
 
-    If the Vikunja CLI errors on a single task, log the title and keep
-    going — do not block step 3 or step 4 on a Vikunja failure. Vikunja
-    is a nice-to-have output, not the workflow's core contract.
+    Leave the `tasks-YYYY-MM-DD.json` file in place after the batch
+    call completes — do not `rm` it. It is a compact, human-readable
+    record of exactly what Sam tried to create on that day and is the
+    fastest answer when Dan later asks "what did you put in Vikunja
+    yesterday?". Periodic cleanup of these files is out of scope for
+    this skill.
+
+    If you happen to have zero surviving candidates after phase 2,
+    skip phase 3 entirely — do not run `batch-create` with an empty
+    array and do not write the tmp file. There is nothing to do.
 
     ### Step 3 — Store the memory digest
 
@@ -242,8 +361,12 @@ data:
 
     1. Today's file: `/data/workspace/wiki/sources/meetings-YYYY-MM-DD.md`
        — always.
-    2. Any file named in the script's `UPDATED sources` output — Dan has
-       added annotations that may contain new decisions or action items.
+    2. Any file named in a `CHANGED sources (late transcripts)` line
+       from step 1 — these are prior days whose meetings are being seen
+       here for the first time.
+    3. Any file named in a `CHANGED sources (annotated)` line from step
+       1 — Dan has added notes that may contain new decisions, context,
+       or reinterpretations.
 
     For each file, follow the `wiki-management` skill's Ingest operation:
 
@@ -315,10 +438,26 @@ data:
       token. Surface to Dan and stop.
     - Speakr HTTP 5xx or connection error → retry the script once; if it
       fails again, surface to Dan and stop.
-    - Script prints `Wrote 0 meetings` → exit cleanly after step 1. Not
-      an error; Dan may simply have had no meetings that day.
+    - Script prints `Wrote 0 meetings` AND no `CHANGED sources (late
+      transcripts)` line → exit cleanly after step 1. Not an error; Dan
+      simply had no meetings that day and nothing recovered from
+      previous days either. If a late-transcripts line IS present you
+      still have work to do — skip today's exec summary but run step
+      2.5 on the named backfill files.
     - Vikunja CLI error on a specific task → log the title, continue
       with the rest of step 2.5. Do not block step 3 or step 4.
+    - `vikunja task create --assignee dan` prints
+      `Warning: could not assign @dan ...` on stderr but still exits 0 →
+      the task was created without an assignee. Vikunja's user-search
+      endpoint rejects API tokens; the CLI falls back to the
+      current-user endpoint, so in practice this only fires if the
+      token's owning user is renamed or the token is ever rotated to a
+      different account. Log the title and move on; do not retry.
+    - Primary file contains one or more `Warning: summary appears
+      malformed` banners → skip those specific recordings in step 2.5
+      (no Vikunja tasks) and step 4 (no wiki pages). Surface the count
+      to Dan in your final reply with the recording IDs so he can
+      manually trigger a re-summarize in Speakr's UI.
     - `file_read` returns "not found" on the source file → you almost
       certainly used a relative path. Re-read the "Why paths are always
       absolute" section and retry with the full `/data/workspace/...`
@@ -343,7 +482,7 @@ data:
     and memory/ (backward compat for exec summary workflow).
     Reports which source files changed so Sam can re-distill them.
     """
-    import json, os, urllib.request, datetime, pathlib, sys, hashlib
+    import json, os, urllib.request, datetime, pathlib, sys
 
     BASE = 'https://meetings.coffee-anon.com'
     TOKEN = os.environ['SPEAKR_API_TOKEN']
@@ -384,16 +523,84 @@ data:
             headers={'Authorization': f'Bearer {TOKEN}'})
         return json.loads(urllib.request.urlopen(r).read())
 
-    def file_hash(path):
+    def read_existing(path):
+        """Return the file's text contents, or None if it doesn't exist."""
         if not path.exists():
             return None
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return path.read_text()
+
+    def classify_change(old_text, new_text):
+        """Classify how a meeting file's content changed between two runs.
+
+        Returns one of:
+          ''                — unchanged
+          'late-transcripts' — prior file was the 'no completed recordings'
+                              placeholder (or missing) and the new file has
+                              real meeting headers. These need Step 2.5
+                              because action items were NOT captured by the
+                              previous cron run.
+          'annotated'        — prior file already had real meeting headers
+                              and the content differs. Treat as Dan's notes;
+                              re-distill into the wiki in Step 4 but do not
+                              re-run Step 2.5 (action items were captured
+                              on the original pass).
+        """
+        if old_text == new_text:
+            return ''
+        old_has_meetings = bool(old_text and '\n## ' in old_text)
+        new_has_meetings = '\n## ' in new_text
+        if not old_has_meetings and new_has_meetings:
+            return 'late-transcripts'
+        return 'annotated'
+
+    def extract_time(meeting_date):
+        """Pull HH:MM from a Speakr meeting_date string.
+
+        Speakr has shipped both 'YYYY-MM-DDTHH:MM:SS' and
+        'YYYY-MM-DD HH:MM:SS' shapes over the years, so we don't hardcode
+        offsets — we split on T or space and take the first five chars of
+        the time half.
+        """
+        if not meeting_date:
+            return ''
+        if 'T' in meeting_date:
+            parts = meeting_date.split('T', 1)
+        elif ' ' in meeting_date:
+            parts = meeting_date.split(' ', 1)
+        else:
+            return ''
+        if len(parts) != 2:
+            return ''
+        return parts[1][:5]
+
+    def looks_like_garbage_summary(text):
+        """Heuristic detection of LLM-hallucinated summary output.
+
+        Triggers on two patterns we have observed on real Speakr recordings
+        when the upstream summarization model failed:
+          - high ratio of CJK / Hangul / other exotic codepoints in what
+            should be English text
+          - the literal word 'placeholder' repeated several times
+        Both correlate with garbage that must not flow into Vikunja tasks
+        or wiki distillation.
+        """
+        if not text:
+            return False
+        n = len(text)
+        if n < 80:
+            return False
+        exotic = sum(1 for c in text if ord(c) > 0x2E80)
+        if exotic / n > 0.08:
+            return True
+        if text.lower().count('placeholder') > 3:
+            return True
+        return False
 
     def fetch_date(target_date):
-        """Fetch recordings for a date, write files, return (ok, failed, pending, new, changed)."""
+        """Fetch recordings for a date, write files, return a dict of counts."""
         wiki_out = pathlib.Path(f'{WIKI_SOURCES}/meetings-{target_date}.md')
         mem_out = pathlib.Path(f'{MEM}/meetings-{target_date}.md')
-        old_hash = file_hash(wiki_out)
+        old_text = read_existing(wiki_out)
 
         # Track titles from prior run for new-since-last detection
         previous_titles = set()
@@ -412,11 +619,15 @@ data:
                 content = f'# Meetings — {target_date}\n\nNo completed meeting recordings for today.\n'
                 wiki_out.write_text(content)
                 mem_out.write_text(content)
-            return 0, 0, 0, [], old_hash != file_hash(wiki_out)
+            return {
+                'ok': 0, 'failed': 0, 'pending': 0, 'garbage': 0,
+                'new': [], 'change_kind': classify_change(old_text, read_existing(wiki_out) or ''),
+            }
 
         ok = 0
         failed = 0
         pending_summaries = 0
+        garbage_count = 0
         new_since_last = []
         lines = [f'# Meetings — {target_date}\n\n']
 
@@ -435,8 +646,7 @@ data:
 
             title = rec.get('title', title)
             participants = rec.get('participants', 'Unknown')
-            meeting_date = rec.get('meeting_date', '')
-            time_str = meeting_date[11:16] if len(meeting_date) > 15 else meeting_date
+            time_str = extract_time(rec.get('meeting_date', ''))
             tags = ', '.join(t.get('name','') for t in rec.get('tags', []))
             summary = rec.get('summary', '')
             notes = rec.get('notes', '')
@@ -453,7 +663,19 @@ data:
             lines.append(f'**Transcript:** {BASE}/recording/{rid}\n\n')
 
             if summary:
-                lines.append(f'### Summary\n{summary}\n\n')
+                if looks_like_garbage_summary(summary):
+                    lines.append(
+                        '### Summary\n'
+                        '*Warning: summary appears malformed — upstream LLM '
+                        'likely hallucinated. Skip this recording for wiki '
+                        'distillation and Vikunja task creation; consider '
+                        'triggering a manual re-summarize in Speakr. '
+                        'Original output below for reference.*\n\n'
+                    )
+                    lines.append(f'{summary}\n\n')
+                    garbage_count += 1
+                else:
+                    lines.append(f'### Summary\n{summary}\n\n')
             else:
                 lines.append('### Summary\n*Summary pending — recording may still be processing.*\n\n')
                 pending_summaries += 1
@@ -487,31 +709,53 @@ data:
         mem_out.parent.mkdir(parents=True, exist_ok=True)
         mem_out.write_text(content)
 
-        changed = old_hash != file_hash(wiki_out)
-        return ok, failed, pending_summaries, new_since_last, changed
+        return {
+            'ok': ok,
+            'failed': failed,
+            'pending': pending_summaries,
+            'garbage': garbage_count,
+            'new': new_since_last,
+            'change_kind': classify_change(old_text, content),
+        }
 
-    # Fetch all dates
-    all_updated = []
+    # Fetch all dates. For non-primary (lookback) dates, we split change
+    # reports into two flavors so Sam can treat them differently:
+    #   - late transcripts: the previous run wrote an empty placeholder
+    #     and the transcripts have since landed. Step 2.5 must run on
+    #     these or action items get silently lost.
+    #   - annotated: Dan edited an already-populated file. Step 4 should
+    #     re-distill, Step 2.5 should NOT run (originals were already
+    #     captured on the first pass).
+    late_transcripts = []
+    annotated = []
     for target_date in dates_to_fetch:
-        ok, failed, pending, new, changed = fetch_date(target_date)
+        result = fetch_date(target_date)
         is_primary = target_date == dates_to_fetch[0]
 
         if is_primary:
-            parts = [f'Wrote {ok} meetings to meetings-{target_date}.md']
-            if failed:
-                parts.append(f'{failed} failed to fetch')
-            if pending:
-                parts.append(f'{pending} still processing')
-            if new:
-                parts.append(f'New since last run: {", ".join(new)}')
+            parts = [f'Wrote {result["ok"]} meetings to meetings-{target_date}.md']
+            if result['failed']:
+                parts.append(f'{result["failed"]} failed to fetch')
+            if result['pending']:
+                parts.append(f'{result["pending"]} still processing')
+            if result['garbage']:
+                parts.append(f'{result["garbage"]} summaries flagged as possibly malformed')
+            if result['new']:
+                parts.append(f'New since last run: {", ".join(result["new"])}')
             print('. '.join(parts))
+            continue
 
-        if changed and not is_primary:
-            all_updated.append(f'meetings-{target_date}.md')
+        if result['change_kind'] == 'late-transcripts':
+            late_transcripts.append(f'meetings-{target_date}.md')
+        elif result['change_kind'] == 'annotated':
+            annotated.append(f'meetings-{target_date}.md')
 
-    if all_updated:
-        print(f'UPDATED sources (Dan annotated): {", ".join(all_updated)}')
-        print('Re-distill these in Step 4 — annotations may contain new decisions or action items.')
+    if late_transcripts:
+        print(f'CHANGED sources (late transcripts): {", ".join(late_transcripts)}')
+        print('Run Step 2.5 on these files — action items were NOT captured by the previous cron.')
+    if annotated:
+        print(f'CHANGED sources (annotated): {", ".join(annotated)}')
+        print('Re-distill in Step 4 only — Dan added notes to already-processed meetings.')
 
   speakr-transcript.py: |
     #!/usr/bin/env python3

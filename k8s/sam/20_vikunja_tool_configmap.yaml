@@ -23,6 +23,13 @@ data:
                                                     current order
 
       vikunja task create <project-id> --title "..." [--description ...] [--due YYYY-MM-DD] [--priority 1-5] [--assignee user]
+      vikunja task batch-create <project-id> [--assignee user] (--stdin | --file PATH)
+                                                    Create many tasks in one call. Reads a JSON
+                                                    array from stdin or a file; each object may
+                                                    specify title, description, priority, due,
+                                                    labels, assignee. Labels are created on
+                                                    demand and attached in-call, so no follow-up
+                                                    task-label command is needed.
       vikunja task update <task-id> [--done] [--title ...] [--description ...] [--due ...] [--priority 1-5] [--assignee user]
       vikunja task show   <task-id>                 Full task detail (description, labels, assignees, comments)
       vikunja task delete <task-id>                 Delete a task (use for duplicates)
@@ -56,8 +63,28 @@ data:
     TOKEN = os.environ.get("VIKUNJA_API_TOKEN", "")
 
 
-    def _api(method, path, data=None, timeout=15):
-        """Make an authenticated Vikunja API request."""
+    class VikunjaError(Exception):
+        """Raised by _api when raise_on_error=True and the request fails.
+
+        Lets callers of optional operations (for example, assignment after
+        a successful task create) recover with a warning instead of aborting
+        the whole CLI invocation with exit 1.
+        """
+        def __init__(self, code, message):
+            self.code = code
+            self.message = message
+            super().__init__(f"HTTP {code}: {message}")
+
+
+    def _api(method, path, data=None, timeout=15, raise_on_error=False):
+        """Make an authenticated Vikunja API request.
+
+        Default behavior prints HTTP errors to stderr and calls sys.exit(1),
+        which is correct for primary commands. Pass raise_on_error=True to
+        get a VikunjaError instead — use this for optional side operations
+        that should not abort the primary command (for example, resolving a
+        user for an assignment after a successful task create).
+        """
         if not TOKEN:
             print("ERROR: VIKUNJA_API_TOKEN not set", file=sys.stderr)
             sys.exit(1)
@@ -74,15 +101,21 @@ data:
             return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
             error_body = e.read().decode() if e.fp else ""
-            print(f"ERROR: HTTP {e.code} — {e.reason}", file=sys.stderr)
+            detail = ""
             if error_body:
                 try:
-                    detail = json.loads(error_body)
-                    print(f"Detail: {detail.get('message', error_body)}", file=sys.stderr)
+                    detail = json.loads(error_body).get("message", error_body)
                 except json.JSONDecodeError:
-                    print(f"Detail: {error_body[:500]}", file=sys.stderr)
+                    detail = error_body[:500]
+            if raise_on_error:
+                raise VikunjaError(e.code, detail or e.reason)
+            print(f"ERROR: HTTP {e.code} — {e.reason}", file=sys.stderr)
+            if detail:
+                print(f"Detail: {detail}", file=sys.stderr)
             sys.exit(1)
         except urllib.error.URLError as e:
+            if raise_on_error:
+                raise VikunjaError(0, str(e.reason))
             print(f"ERROR: {e.reason}", file=sys.stderr)
             sys.exit(1)
 
@@ -153,6 +186,48 @@ data:
             '  priority field (1=lowest, 5=highest). For visual priority labels\n'
             '  use `vikunja task label`.\n'
         ),
+        "task batch-create": (
+            'Usage: vikunja task batch-create <project-id> \\\n'
+            '         [--assignee <username>] (--stdin | --file PATH)\n'
+            '\n'
+            '  Create many tasks in a single CLI call. Reads a JSON array\n'
+            '  from stdin or from a file; each object may have:\n'
+            '    - title        (required)\n'
+            '    - description  (optional)\n'
+            '    - priority     (optional, integer 1-5)\n'
+            '    - due          (optional, "YYYY-MM-DD")\n'
+            '    - labels       (optional, list of strings — auto-created if\n'
+            '                    missing, so no follow-up task-label command\n'
+            '                    is needed)\n'
+            '    - assignee     (optional, per-item override of CLI --assignee)\n'
+            '\n'
+            '  Output: one status line per task, then a final summary line\n'
+            '  of the form "Batch: C created, S skipped, F failed".\n'
+            '\n'
+            '  Exit code: 0 if every task was created successfully (label or\n'
+            '  assignment failures still exit 0, matching `task create`\'s\n'
+            '  behavior). 1 if any task hard-failed during creation, or if\n'
+            '  the input was not valid JSON.\n'
+            '\n'
+            '  Prefer --file for Sam-style agent invocations: write the JSON\n'
+            '  to /data/.zeroclaw/workspace/tasks-YYYY-MM-DD.json with your\n'
+            '  file_write tool, then run the CLI with --file. Avoids the\n'
+            '  shell-escaping headache of passing multi-item JSON via heredoc.\n'
+            '  --stdin exists for interactive shell use and pipeline cases.\n'
+            '\n'
+            'Example (file input):\n'
+            '  # first, write this JSON to /tmp/tasks.json:\n'
+            '  # [\n'
+            '  #   {"title": "Reschedule Minnesota meetings", "priority": 4,\n'
+            '  #    "due": "2026-04-14",\n'
+            '  #    "description": "From standup.",\n'
+            '  #    "labels": ["from-meeting"]},\n'
+            '  #   {"title": "Draft agent doc", "priority": 3,\n'
+            '  #    "description": "From 1:1 with Caspar.",\n'
+            '  #    "labels": ["from-meeting"]}\n'
+            '  # ]\n'
+            '  vikunja task batch-create 1 --assignee dan --file /tmp/tasks.json\n'
+        ),
         "task update": (
             'Usage: vikunja task update <task-id> [--done] [--title "..."] \\\n'
             '         [--description "..."] [--due "YYYY-MM-DD"] [--priority 1-5] [--assignee <username>]\n'
@@ -204,13 +279,14 @@ data:
             'Usage: vikunja task <subcommand> ...\n'
             '\n'
             'Subcommands:\n'
-            '  create   Create a task\n'
-            '  update   Update a task\n'
-            '  show     Show full task details\n'
-            '  delete   Delete a task\n'
-            '  assign   Assign a user\n'
-            '  comment  Add a comment\n'
-            '  label    Manage labels on a task\n'
+            '  create        Create a task\n'
+            '  batch-create  Create many tasks from a JSON array on stdin\n'
+            '  update        Update a task\n'
+            '  show          Show full task details\n'
+            '  delete        Delete a task\n'
+            '  assign        Assign a user\n'
+            '  comment       Add a comment\n'
+            '  label         Manage labels on a task\n'
             '\n'
             'Run: vikunja help task <subcommand>   for per-subcommand usage\n'
         ),
@@ -342,20 +418,83 @@ data:
 
 
     def _resolve_user_id(username):
-        """Resolve a username to a numeric user ID via search."""
-        results = _api("GET", f"/users?s={username}")
-        for u in results:
+        """Resolve a username to a numeric user ID.
+
+        Tries the /user endpoint (current authenticated user) first because
+        /users?s=<name> requires frontend JWT auth and returns 401 under an
+        API token, while /user works with API tokens. In practice this Sam
+        instance only ever assigns to the single human user that owns the
+        token, so the /user path handles almost every call.
+
+        Raises VikunjaError on failure so the caller can decide whether the
+        whole command should abort.
+        """
+        me = _api("GET", "/user", raise_on_error=True)
+        if me and me.get("username") == username:
+            return me.get("id")
+        results = _api(
+            "GET",
+            f"/users?s={urllib.parse.quote(username)}",
+            raise_on_error=True,
+        )
+        for u in results or []:
             if u.get("username") == username:
                 return u.get("id")
-        print(f"ERROR: User '{username}' not found", file=sys.stderr)
-        sys.exit(1)
+        raise VikunjaError(404, f"user '{username}' not found")
 
 
     def _assign_user(task_id, username):
-        """Assign a user to a task by username."""
+        """Assign a user to a task by username. Raises VikunjaError on failure."""
         user_id = _resolve_user_id(username)
-        _api("PUT", f"/tasks/{task_id}/assignees", {"user_id": user_id})
+        _api(
+            "PUT",
+            f"/tasks/{task_id}/assignees",
+            {"user_id": user_id},
+            raise_on_error=True,
+        )
         print(f"  Assigned @{username} to task #{task_id}")
+
+
+    def _build_task_payload(project_id, title, description=None, due=None, priority=None):
+        """Shared helper for constructing a Vikunja task create payload.
+
+        Single source of truth for how CLI fields map to the Vikunja API
+        body, so `task create` and `task batch-create` can't drift.
+        """
+        data = {"title": title, "project_id": int(project_id)}
+        if description is not None:
+            data["description"] = description
+        if due is not None:
+            data["due_date"] = due + "T00:00:00Z"
+        if priority is not None:
+            data["priority"] = int(priority)
+        return data
+
+
+    def _attach_label(task_id, name, create_missing=True, color=None):
+        """Look up a label by name (optionally creating it) and attach to task.
+
+        Returns the label dict on success. Raises VikunjaError on any failure
+        so the caller can decide whether to continue or abort. Used by
+        `task batch-create` to inline label attachment into the creation
+        flow; the standalone `task label --add` path has its own slightly
+        different semantics (needs `--create-missing` passed explicitly).
+        """
+        label = _find_label_by_name(name)
+        if not label:
+            if not create_missing:
+                raise VikunjaError(404, f"label '{name}' not found")
+            payload = {"title": name}
+            if color:
+                payload["hex_color"] = color.lstrip("#")
+            label = _api("PUT", "/labels", payload, raise_on_error=True)
+        _api(
+            "PUT",
+            f"/tasks/{task_id}/labels",
+            {"label_id": label["id"]},
+            raise_on_error=True,
+        )
+        return label
 
 
     def cmd_task_create(args):
@@ -374,18 +513,167 @@ data:
         if not title:
             print("ERROR: --title is required", file=sys.stderr)
             sys.exit(1)
-        data = {"title": title, "project_id": int(project_id)}
-        if "description" in flags:
-            data["description"] = flags["description"]
-        if "due" in flags:
-            data["due_date"] = flags["due"] + "T00:00:00Z"
-        if "priority" in flags:
-            data["priority"] = int(flags["priority"])
+        data = _build_task_payload(
+            project_id,
+            title,
+            description=flags.get("description"),
+            due=flags.get("due"),
+            priority=flags.get("priority"),
+        )
         result = _api("PUT", f"/projects/{project_id}/tasks", data)
         task_id = result.get("id", "?")
         print(f"Task #{task_id} created: {result.get('title', title)}")
         if "assignee" in flags:
-            _assign_user(task_id, flags["assignee"])
+            try:
+                _assign_user(task_id, flags["assignee"])
+            except VikunjaError as e:
+                print(
+                    f"  Warning: could not assign @{flags['assignee']} to "
+                    f"task #{task_id} ({e}). Task was created without an "
+                    f"assignee.",
+                    file=sys.stderr,
+                )
+
+
+    def cmd_task_batch_create(args):
+        """Create many tasks from a JSON array on stdin.
+
+        Collapses what would otherwise be N `task create` calls plus N
+        `task label` calls into a single CLI invocation. Sam's daily
+        meeting review typically produces 4-5 tasks at once; shelling out
+        up to 10 times round-trips through the runtime provider and each
+        one eats a fresh HTTP timeout budget, which has historically
+        caused cron-timeouts under Tier-0.5 load. One batch call is one
+        timeout window.
+
+        The dedup decision stays on the caller's side: this command does
+        not look at existing tasks. Callers (for example the
+        `daily-meeting-summary` skill's step 2.5) are expected to pull
+        `vikunja tasks <project> --format json` first and filter.
+        """
+        _check_help(args, "task batch-create")
+        flags, positional = _parse_args(args, {
+            "assignee": "str", "stdin": "bool", "file": "str",
+        })
+        source_flags = [bool(flags.get("stdin")), "file" in flags]
+        if not positional or sum(source_flags) != 1:
+            print(
+                'Usage: vikunja task batch-create <project-id> '
+                '[--assignee <username>] (--stdin | --file PATH)',
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        project_id = positional[0]
+        try:
+            int(project_id)
+        except ValueError:
+            print(f"ERROR: project-id must be an integer (got {project_id!r})",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        if "file" in flags:
+            try:
+                with open(flags["file"]) as f:
+                    raw = f.read()
+            except OSError as e:
+                print(f"ERROR: could not read {flags['file']}: {e}",
+                      file=sys.stderr)
+                sys.exit(1)
+        else:
+            raw = sys.stdin.read()
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"ERROR: stdin is not valid JSON: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(items, list):
+            print("ERROR: stdin must be a JSON array of task objects",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        default_assignee = flags.get("assignee")
+        created_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                print(
+                    f"ERROR: item {idx}: expected object, got {type(item).__name__}",
+                    file=sys.stderr,
+                )
+                failed_count += 1
+                continue
+            title = item.get("title")
+            if not title:
+                print(f"ERROR: item {idx}: missing required field 'title'",
+                      file=sys.stderr)
+                failed_count += 1
+                continue
+
+            payload = _build_task_payload(
+                project_id,
+                title,
+                description=item.get("description"),
+                due=item.get("due"),
+                priority=item.get("priority"),
+            )
+            try:
+                result = _api(
+                    "PUT",
+                    f"/projects/{project_id}/tasks",
+                    payload,
+                    raise_on_error=True,
+                )
+            except VikunjaError as e:
+                print(f"ERROR: item {idx} ({title!r}): create failed ({e})",
+                      file=sys.stderr)
+                failed_count += 1
+                continue
+
+            task_id = result.get("id", "?")
+            label_names = item.get("labels") or []
+            attached_labels = []
+            for label_name in label_names:
+                try:
+                    _attach_label(task_id, label_name, create_missing=True)
+                    attached_labels.append(label_name)
+                except VikunjaError as e:
+                    print(
+                        f"  Warning: task #{task_id}: could not attach label "
+                        f"'{label_name}' ({e})",
+                        file=sys.stderr,
+                    )
+
+            assignee = item.get("assignee", default_assignee)
+            assigned_to = None
+            if assignee:
+                try:
+                    _assign_user(task_id, assignee)
+                    assigned_to = assignee
+                except VikunjaError as e:
+                    print(
+                        f"  Warning: task #{task_id}: could not assign "
+                        f"@{assignee} ({e}). Task was created without an "
+                        f"assignee.",
+                        file=sys.stderr,
+                    )
+
+            trailer_bits = []
+            if attached_labels:
+                trailer_bits.append(f"labels: {','.join(attached_labels)}")
+            if assigned_to:
+                trailer_bits.append(f"assigned: {assigned_to}")
+            trailer = f" ({'; '.join(trailer_bits)})" if trailer_bits else ""
+            print(f"Task #{task_id} created: {title}{trailer}")
+            created_count += 1
+
+        print(
+            f"Batch: {created_count} created, {skipped_count} skipped, "
+            f"{failed_count} failed"
+        )
+        if failed_count:
+            sys.exit(1)
 
 
     def cmd_task_update(args):
@@ -417,7 +705,15 @@ data:
             status = "DONE" if result.get("done") else "TODO"
             print(f"Task #{task_id} updated [{status}]: {result.get('title', '?')}")
         if assignee:
-            _assign_user(task_id, assignee)
+            try:
+                _assign_user(task_id, assignee)
+            except VikunjaError as e:
+                print(
+                    f"  Warning: could not assign @{assignee} to task "
+                    f"#{task_id} ({e}). Task was updated without "
+                    f"reassignment.",
+                    file=sys.stderr,
+                )
         if not data and not assignee:
             print("Nothing to update. Use --done, --title, --description, --due, --priority, or --assignee.",
                   file=sys.stderr)
@@ -431,7 +727,15 @@ data:
         if not positional or "user" not in flags:
             print('Usage: vikunja task assign <task-id> --user <username>', file=sys.stderr)
             sys.exit(1)
-        _assign_user(positional[0], flags["user"])
+        try:
+            _assign_user(positional[0], flags["user"])
+        except VikunjaError as e:
+            print(
+                f"ERROR: could not assign @{flags['user']} to task "
+                f"#{positional[0]} ({e})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
 
     def cmd_task_comment(args):
@@ -764,6 +1068,8 @@ data:
             subcmd = rest[0]
             if subcmd == "create":
                 cmd_task_create(rest[1:])
+            elif subcmd == "batch-create":
+                cmd_task_batch_create(rest[1:])
             elif subcmd == "update":
                 cmd_task_update(rest[1:])
             elif subcmd == "assign":
