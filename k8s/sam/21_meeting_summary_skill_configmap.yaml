@@ -87,11 +87,11 @@ data:
 
     ```
     You are in an isolated cron session for speakr-daily-summary.
-    Run the daily-meeting-summary skill: steps 1 through 4, in order.
+    Run the daily-meeting-summary skill: steps 1 through 5, in order.
     Do not call cron_run — you are already inside the cron job.
-    If step 1 reports zero meetings for today, stop after step 1 and
-    exit cleanly with a one-line status. Otherwise continue through
-    step 4.
+    If step 1 reports zero meetings for today AND no CHANGED sources
+    (late transcripts) are flagged, stop after step 1 and exit cleanly
+    with a one-line status. Otherwise continue through step 5.
     ```
 
     ## Workflow
@@ -130,15 +130,15 @@ data:
       — these are prior days whose transcripts were not yet available at
       the previous cron run (the previous file was the
       `No completed meeting recordings` placeholder) but have since
-      landed. Their action items were NEVER captured by step 2.5. You
-      must run step 2.5 on each of these files in addition to today's
+      landed. Their action items were NEVER captured by step 3. You
+      must run step 3 on each of these files in addition to today's
       primary file. Prefix each Vikunja task description with
       `(late backfill from YYYY-MM-DD)` so Dan can tell real-time tasks
       from recovered ones.
     - `CHANGED sources (annotated): meetings-YYYY-MM-DD.md, ...` — these
       are prior days that already had real meeting content on the
       previous run and whose file content now differs. Treat as Dan's
-      annotations. Re-distill in step 4 only; do NOT re-run step 2.5
+      annotations. Re-distill in step 5 only; do NOT re-run step 3
       (original action items were already captured on the first pass).
     - Any warning about pending or failed recordings — surface in your
       final reply so Dan knows what state things are in. (The garbage
@@ -151,7 +151,7 @@ data:
     meetings for today but named files in `CHANGED sources (late
     transcripts)`, skip step 2 entirely — do not write an exec summary
     for a prior date (Dan does not re-read yesterday's end-of-day
-    recap). Jump straight to step 2.5 for the backfill files.
+    recap). Jump straight to step 3 for the backfill files.
 
     Read the primary source file using its absolute path:
 
@@ -188,9 +188,9 @@ data:
     omitting the section. Dan scans for these headers and an empty
     section is a signal; a missing section is a hole.
 
-    ### Step 2.5 — Create Vikunja tasks
+    ### Step 3 — Create Vikunja tasks
 
-    Step 2.5 has three phases: **gather candidates** → **dedup against
+    Step 3 has three phases: **gather candidates** → **dedup against
     existing** → **create in one batch**. Keep them separate in your
     head — they run against the same pool of items and only differ in
     what they do with them.
@@ -208,7 +208,7 @@ data:
 
     Then add any file named in a `CHANGED sources (late transcripts)`
     line from step 1. Those meetings never went through step 2 / step
-    2.5 on the previous cron run because the transcripts had not yet
+    3 on the previous cron run because the transcripts had not yet
     landed, so their action items are hiding. For those backfill files:
 
     - Extract action items directly from the per-meeting `## Action
@@ -224,8 +224,8 @@ data:
       recording ID to surface to Dan at the end.
 
     Ignore any `CHANGED sources (annotated)` files here. Their original
-    action items were already captured by step 2.5 on the day they
-    first landed; the annotations themselves go into step 4 for wiki
+    action items were already captured by step 3 on the day they
+    first landed; the annotations themselves go into step 5 for wiki
     distillation, not into Vikunja.
 
     #### Phase 2 — Dedup against existing tasks
@@ -313,17 +313,23 @@ data:
     ]
     ```
 
-    Then run the batch:
+    Then run the batch. Do not pass `--assignee dan` — this Sam
+    instance's Vikunja API token has no user-scope access, so the
+    assignment call always 401s. The CLI degrades gracefully (the task
+    is still created, and the batch exits 0), but the warning is noise
+    and the `assigned:` trailer will be missing from the status line.
+    Tasks land in Dan's inbox correctly via project ownership; explicit
+    assignment is redundant.
 
     ```
-    shell: vikunja task batch-create 1 --assignee dan --file /data/.zeroclaw/workspace/tasks-YYYY-MM-DD.json
+    shell: vikunja task batch-create 1 --file /data/.zeroclaw/workspace/tasks-YYYY-MM-DD.json
     ```
 
     Output is one `Task #<id> created: ...` line per item, followed by
     a trailing `Batch: C created, S skipped, F failed` summary. When
     F > 0 the command exits 1 — this is intentional so cron-level
     observability picks it up, but you should still continue into step
-    3 and step 4 (Vikunja is a nice-to-have output, not the workflow's
+    4 and step 5 (Vikunja is a nice-to-have output, not the workflow's
     core contract) and surface the failed titles to Dan in your final
     reply.
 
@@ -338,7 +344,7 @@ data:
     skip phase 3 entirely — do not run `batch-create` with an empty
     array and do not write the tmp file. There is nothing to do.
 
-    ### Step 3 — Store the memory digest
+    ### Step 4 — Store the memory digest
 
     Short pointer, not content. The wiki is the durable store; memory is
     just a breadcrumb you can recall later:
@@ -347,10 +353,10 @@ data:
     memory_store key=meetings_digest_YYYY-MM-DD category=daily value="N meetings. Files: /data/workspace/wiki/sources/meetings-YYYY-MM-DD.md, /data/workspace/memory/meetings-exec-YYYY-MM-DD.md. Theme: <one sentence>."
     ```
 
-    ### Step 4 — Wiki distillation
+    ### Step 5 — Wiki distillation
 
     The raw source files in `/data/workspace/wiki/sources/` are the
-    immutable data layer. Step 4 turns them into durable wiki pages for
+    immutable data layer. Step 5 turns them into durable wiki pages for
     people, projects, and decisions.
 
     **Delegate the page format to the `wiki-management` skill** — that's
@@ -380,7 +386,7 @@ data:
 
     Be conservative. Not every meeting deserves a new wiki page. If the
     content is routine status updates with no new commitments or
-    decisions, finish step 4 after reading the source file and exit
+    decisions, finish step 5 after reading the source file and exit
     without writing anything. Writing a trivial page is worse than
     writing none — it dilutes the wiki.
 
@@ -400,7 +406,10 @@ data:
        for the full per-meeting detail.
     4. If the files don't exist for that date, run
        `shell: python3 /data/.zeroclaw/workspace/skills/daily-meeting-summary/speakr-fetch.py YYYY-MM-DD`
-       then rerun steps 2–3.
+       then rerun step 2 (exec summary) and step 4 (memory digest).
+       Skip step 3 — do not create Vikunja tasks from old meetings
+       ad-hoc; those either got handled on the original day or Dan
+       can create them by hand.
 
     ## Full transcript lookup
 
@@ -443,19 +452,21 @@ data:
       simply had no meetings that day and nothing recovered from
       previous days either. If a late-transcripts line IS present you
       still have work to do — skip today's exec summary but run step
-      2.5 on the named backfill files.
+      3 on the named backfill files.
     - Vikunja CLI error on a specific task → log the title, continue
-      with the rest of step 2.5. Do not block step 3 or step 4.
-    - `vikunja task create --assignee dan` prints
-      `Warning: could not assign @dan ...` on stderr but still exits 0 →
-      the task was created without an assignee. Vikunja's user-search
-      endpoint rejects API tokens; the CLI falls back to the
-      current-user endpoint, so in practice this only fires if the
-      token's owning user is renamed or the token is ever rotated to a
-      different account. Log the title and move on; do not retry.
+      with the rest of step 3. Do not block step 4 or step 5.
+    - `vikunja ... --assignee dan` prints
+      `Warning: could not assign @dan ...` on stderr but still exits 0
+      → the task was created without an assignee. This Sam instance's
+      API token has no user-scope access: both `/users?s=` and `/user`
+      return 401, so the CLI cannot resolve `dan` → numeric ID. The
+      recommended call in Step 3 does not pass `--assignee` for this
+      reason; if you see this warning, you're running an older call
+      path — drop the flag. Tasks land in Dan's inbox correctly
+      regardless because the project is Dan's.
     - Primary file contains one or more `Warning: summary appears
-      malformed` banners → skip those specific recordings in step 2.5
-      (no Vikunja tasks) and step 4 (no wiki pages). Surface the count
+      malformed` banners → skip those specific recordings in step 3
+      (no Vikunja tasks) and step 5 (no wiki pages). Surface the count
       to Dan in your final reply with the recording IDs so he can
       manually trigger a re-summarize in Speakr's UI.
     - `file_read` returns "not found" on the source file → you almost
@@ -536,13 +547,13 @@ data:
           ''                — unchanged
           'late-transcripts' — prior file was the 'no completed recordings'
                               placeholder (or missing) and the new file has
-                              real meeting headers. These need Step 2.5
+                              real meeting headers. These need Step 3
                               because action items were NOT captured by the
                               previous cron run.
           'annotated'        — prior file already had real meeting headers
                               and the content differs. Treat as Dan's notes;
-                              re-distill into the wiki in Step 4 but do not
-                              re-run Step 2.5 (action items were captured
+                              re-distill into the wiki in Step 5 but do not
+                              re-run Step 3 (action items were captured
                               on the original pass).
         """
         if old_text == new_text:
@@ -721,10 +732,10 @@ data:
     # Fetch all dates. For non-primary (lookback) dates, we split change
     # reports into two flavors so Sam can treat them differently:
     #   - late transcripts: the previous run wrote an empty placeholder
-    #     and the transcripts have since landed. Step 2.5 must run on
+    #     and the transcripts have since landed. Step 3 must run on
     #     these or action items get silently lost.
-    #   - annotated: Dan edited an already-populated file. Step 4 should
-    #     re-distill, Step 2.5 should NOT run (originals were already
+    #   - annotated: Dan edited an already-populated file. Step 5 should
+    #     re-distill, Step 3 should NOT run (originals were already
     #     captured on the first pass).
     late_transcripts = []
     annotated = []
@@ -752,10 +763,10 @@ data:
 
     if late_transcripts:
         print(f'CHANGED sources (late transcripts): {", ".join(late_transcripts)}')
-        print('Run Step 2.5 on these files — action items were NOT captured by the previous cron.')
+        print('Run Step 3 on these files — action items were NOT captured by the previous cron.')
     if annotated:
         print(f'CHANGED sources (annotated): {", ".join(annotated)}')
-        print('Re-distill in Step 4 only — Dan added notes to already-processed meetings.')
+        print('Re-distill in Step 5 only — Dan added notes to already-processed meetings.')
 
   speakr-transcript.py: |
     #!/usr/bin/env python3
