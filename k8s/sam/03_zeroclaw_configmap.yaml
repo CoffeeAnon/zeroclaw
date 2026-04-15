@@ -114,6 +114,15 @@ data:
       auto_save = true
       embedding_provider = "none"
 
+      [skills]
+      # Compact mode drops full SKILL.md bodies from the system prompt and
+      # emits only name/description/location per skill; the LLM file_reads
+      # a skill on demand when it decides to use it. Cuts Sam's system
+      # prompt from ~23k to ~3k tokens, bringing Gemma 4 completion times
+      # under the 300s client timeout on typical tool-loop turns.
+      # Context: scrapyard-wiki/incidents/2026-04-14-sam-compact-skills.
+      prompt_injection_mode = "compact"
+
       [gateway]
       port = 3000
       host = "0.0.0.0"
