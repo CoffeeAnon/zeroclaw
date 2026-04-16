@@ -56,6 +56,7 @@ spec:
               mkdir -p /data/.zeroclaw/workspace/skills/browser-navigation
               mkdir -p /data/.zeroclaw/workspace/skills/cron-management
               mkdir -p /data/.zeroclaw/workspace/skills/wiki-management
+              mkdir -p /data/.zeroclaw/workspace/skills/task-tracking
           securityContext:
             runAsUser: 0
             runAsGroup: 0
@@ -238,6 +239,10 @@ spec:
               mountPath: /data/.zeroclaw/workspace/skills/wiki-management/SKILL.md
               subPath: wiki-management.md
               readOnly: true
+            - name: skill-task-tracking
+              mountPath: /data/.zeroclaw/workspace/skills/task-tracking/SKILL.md
+              subPath: task-tracking.md
+              readOnly: true
         - name: signal-api-adapter
           image: citizendaniel/signal-api-adapter:v1.3.0
           imagePullPolicy: Always
@@ -299,6 +304,9 @@ spec:
         - name: skill-wiki-management
           configMap:
             name: zeroclaw-skill-wiki-management
+        - name: skill-task-tracking
+          configMap:
+            name: zeroclaw-skill-task-tracking
         - name: acp-client
           configMap:
             name: acp-client
