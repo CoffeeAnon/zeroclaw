@@ -1,0 +1,128 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zeroclaw-skill-task-tracking
+  namespace: ai-agents
+  labels:
+    app: zeroclaw
+    component: skill
+data:
+  task-tracking.md: |
+    ---
+    name: task-tracking
+    version: 1.0.0
+    description: >
+      Track durable asks from Dan in Vikunja (Sam's inbox, project #3)
+      instead of relying on chat memory. Use whenever Dan sends a
+      message that contains a discrete deliverable — anything phrased
+      as "please X", "can you X", "I need X", "let's do X", or an
+      imperative with a concrete outcome. Also use at the start of
+      any new session or conversation to check pending work, and
+      when Dan asks "what are you working on" / "what's pending" /
+      "what's on your plate".
+    always: false
+    ---
+
+    # Task Tracking
+
+    Your durable task state lives in Vikunja project #3 — "Sam's
+    inbox". The `vikunja` CLI provides a Sam-scoped interface:
+
+    ```
+    vikunja my-tasks [--open] [--format text|json]
+    vikunja my-task create "<title>" [--description "..."] [--priority 1-5] [--due YYYY-MM-DD]
+    vikunja my-task show   <id>
+    vikunja my-task done   <id> [--comment "what I did"]
+    vikunja my-task note   <id> "<progress update>"
+    ```
+
+    All of these operate on your inbox automatically — you do not pass
+    a project ID.
+
+    ## Why Vikunja and not `memory_store`
+
+    `memory_store` has no lifecycle. A two-week-old "please re-run X"
+    sits in SQLite forever and keeps scoring high on relevance, so
+    future sessions see it as if it's still pending — even after
+    you've already done the work. On 2026-04-16 an isolated cron
+    session picked up a three-day-old instruction that way and ran
+    the wrong cron three times in a row. Vikunja tasks have
+    `done: true|false`, timestamps, and are inspectable from Dan's
+    side, so resolved work looks resolved.
+
+    ## When to create a task
+
+    Create a task when Dan's message is a discrete deliverable:
+
+    - Imperative verb with a concrete outcome
+      ("please add a footnote to the incident page")
+    - A request for something actionable, not conversational
+      ("can you figure out the right Vikunja project id?")
+    - Anything with a deadline or a "by X" clause
+    - Anything whose completion you'll need to report back on
+
+    Do **not** create a task for:
+
+    - Conversation, acknowledgements, emoji-only messages
+    - Questions with verbal answers (Dan asks, you reply — no
+      deliverable)
+    - Status checks ("are you there?", "did X work?")
+    - Meta-comments about yourself or tools
+
+    ## Workflow
+
+    **On receiving a task-flavored message:**
+
+    1. `vikunja my-task create "<short title>" --description "<Dan's
+       ask verbatim + any context>"` — capture the ID in your reply.
+    2. Acknowledge Dan briefly. It's helpful but not required to
+       include the task ID: "Got it, tracking as #N."
+    3. Do the work.
+    4. `vikunja my-task done <id> --comment "<what you did, including
+       any IDs / paths / outputs Dan would want to reference>"`.
+    5. Reply to Dan with the final result.
+
+    Steps 1 and 4 are the only CLI calls you need per task. Keep the
+    description and comment short — Dan will open Vikunja to read
+    detail, not your chat replies.
+
+    **On waking / at session start:**
+
+    Before responding to the current message, run
+    `vikunja my-tasks --open`. If there are items, consider whether
+    the current message relates to one (update it rather than
+    creating a duplicate), and whether any other pending item is
+    blocked and needs a nudge to Dan.
+
+    **When Dan asks "what are you working on":**
+
+    `vikunja my-tasks --open`, then summarize. One line per task is
+    plenty — ID, title, how long it's been open.
+
+    ## Context hygiene
+
+    This skill is Compact-mode: only the description loads by default.
+    When you read this body, do not re-read it within the same turn —
+    the content is already in your context. Also do not dump the full
+    `my-tasks` output into your reply to Dan unless he asked for it;
+    summarize.
+
+    ## Progress updates (long-running tasks)
+
+    If a task takes multiple turns or multiple sessions, use
+    `vikunja my-task note <id> "<what changed>"` between steps so
+    the task history is legible if Dan audits it. Do this sparingly
+    — one note per meaningful milestone, not one per tool call.
+
+    ## Failure modes
+
+    - Task creation returns non-zero → the CLI prints the HTTP
+      error. Surface it to Dan and proceed without task tracking for
+      that ask. Do not retry silently.
+    - You're unsure whether a message is a task or conversation →
+      err on the side of creating a task. Over-tracking is cheaper
+      than under-tracking, and closing a trivial task costs one CLI
+      call.
+    - Dan cancels an ask mid-flight → `vikunja my-task done <id>
+      --comment "cancelled — reason"`. Closing with a cancellation
+      note is cleaner than deleting.
