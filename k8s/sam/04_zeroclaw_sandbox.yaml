@@ -155,6 +155,8 @@ spec:
                   optional: true
             - name: VIKUNJA_BASE_URL
               value: "http://vikunja.todolist.svc.cluster.local:3456"
+            - name: VIKUNJA_SAM_PROJECT_ID
+              value: "3"
             - name: ACP_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
