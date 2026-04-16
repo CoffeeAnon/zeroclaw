@@ -982,6 +982,7 @@ async fn main() -> Result<()> {
                 peripheral,
                 interactive,
                 None,
+                None,
             ))
             .await
             .map(|_| ())

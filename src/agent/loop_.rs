@@ -1229,7 +1229,17 @@ pub async fn run_tool_call_loop(
         .collect();
     let use_native_tools = provider.supports_native_tools() && !tool_specs.is_empty();
     let turn_id = Uuid::new_v4().to_string();
-    let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
+    // seen_tool_signatures lives INSIDE the iteration loop (declared below)
+    // so dedup is scoped to a single iteration rather than the whole turn.
+    // Per-turn dedup creates a self-correction spiral when a tool's state
+    // legitimately changes mid-turn (e.g. shell write between two file_reads
+    // of the same path): the second read is forced to fail with "Skipped
+    // duplicate tool call" even though the file content is now different.
+    // The LoopDetector in detection.rs still catches *real* loops via the
+    // tool_name + args + result_hash check, so this relaxation does not
+    // remove safety — it only removes the false-positive layer.
+    // Mirrors upstream PR #3910 (commit d77c6169) which never merged into
+    // this fork.
     let mut missing_tool_call_retry_used = false;
     let mut missing_tool_call_retry_prompt: Option<String> = None;
     let ld_config = LOOP_DETECTION_CONFIG
@@ -1270,6 +1280,8 @@ pub async fn run_tool_call_loop(
     }
 
     for iteration in 0..max_iterations {
+        let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
+
         if cancellation_token
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
@@ -2846,6 +2858,7 @@ pub async fn run(
     peripheral_overrides: Vec<String>,
     interactive: bool,
     hooks: Option<&crate::hooks::HookRunner>,
+    session_id: Option<String>,
 ) -> Result<String> {
     if let Err(error) = crate::plugins::runtime::initialize_from_config(&config.plugins) {
         tracing::warn!("plugin registry initialization skipped: {error}");
@@ -3138,13 +3151,15 @@ pub async fn run(
         {
             let user_key = autosave_memory_key("user_msg");
             let _ = mem
-                .store(&user_key, &msg, MemoryCategory::Conversation, None)
+                .store(&user_key, &msg, MemoryCategory::Conversation, session_id.as_deref())
                 .await;
         }
 
-        // Inject memory + hardware RAG context into user message
+        // Inject memory + hardware RAG context into user message.
+        // session_id scopes recall so isolated cron sessions don't inherit
+        // unrelated signal/chat history. None = global (main session behavior).
         let mem_context =
-            build_context(mem.as_ref(), &msg, config.memory.min_relevance_score, None).await;
+            build_context(mem.as_ref(), &msg, config.memory.min_relevance_score, session_id.as_deref()).await;
         let rag_limit = if config.agent.compact_context { 2 } else { 5 };
         let hw_context = hardware_rag
             .as_ref()

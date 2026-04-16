@@ -228,21 +228,32 @@ async fn run_agent_job(
     let prefixed_prompt = format!("[cron:{} {name}{delivery_suffix}] {prompt}", job.id);
     let model_override = job.model.clone();
 
-    let run_result = match job.session_target {
-        SessionTarget::Main | SessionTarget::Isolated => {
-            Box::pin(crate::agent::run(
-                config.clone(),
-                Some(prefixed_prompt),
-                None,
-                model_override,
-                config.default_temperature,
-                vec![],
-                false,
-                None,
-            ))
-            .await
-        }
+    // Scope memory recall per session target:
+    // - Isolated generates a unique session_id per invocation so the cron starts
+    //   with a clean slate (no leaked signal/chat memories from other sessions).
+    // - Main passes None, which keeps the existing global-recall behavior used
+    //   by the main interactive session.
+    let session_id = match job.session_target {
+        SessionTarget::Isolated => Some(format!(
+            "cron_isolated_{}_{}",
+            job.id,
+            Utc::now().timestamp_millis()
+        )),
+        SessionTarget::Main => None,
     };
+
+    let run_result = Box::pin(crate::agent::run(
+        config.clone(),
+        Some(prefixed_prompt),
+        None,
+        model_override,
+        config.default_temperature,
+        vec![],
+        false,
+        None,
+        session_id,
+    ))
+    .await;
 
     match run_result {
         Ok(response) => (
