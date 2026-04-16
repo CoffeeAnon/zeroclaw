@@ -10,16 +10,21 @@ data:
   task-tracking.md: |
     ---
     name: task-tracking
-    version: 1.0.0
+    version: 1.1.0
     description: >
       Track durable asks from Dan in Vikunja (Sam's inbox, project #3)
-      instead of relying on chat memory. Use whenever Dan sends a
-      message that contains a discrete deliverable — anything phrased
-      as "please X", "can you X", "I need X", "let's do X", or an
-      imperative with a concrete outcome. Also use at the start of
-      any new session or conversation to check pending work, and
-      when Dan asks "what are you working on" / "what's pending" /
-      "what's on your plate".
+      instead of relying on chat memory. Use whenever Dan gives you
+      work to do that produces a durable artifact — audits,
+      investigations, reviews, summaries, reports, changes,
+      implementations, or anything requiring multiple tool calls and
+      a structured result. Imperatives like "please X", "can you X",
+      "I need X", "let's do X", "audit X", "investigate X", "review
+      X", "report back on X" are strong signals. Skip only for
+      single-fact lookups ("what time is it", "are you alive"),
+      acknowledgements, and status pings. Also use at the start of
+      any new session to check pending work, and when Dan asks
+      "what are you working on" / "what's pending" / "what's on
+      your plate".
     always: false
     ---
 
@@ -52,22 +57,49 @@ data:
 
     ## When to create a task
 
-    Create a task when Dan's message is a discrete deliverable:
+    Create a task when Dan asks you to **produce something durable**,
+    even if you deliver the result by reply. The medium is irrelevant;
+    what matters is whether the output is a structured artifact he
+    might reference later.
 
-    - Imperative verb with a concrete outcome
-      ("please add a footnote to the incident page")
-    - A request for something actionable, not conversational
-      ("can you figure out the right Vikunja project id?")
-    - Anything with a deadline or a "by X" clause
-    - Anything whose completion you'll need to report back on
+    Concrete shapes that should always be tracked:
 
-    Do **not** create a task for:
+    - **Audits, investigations, reviews, summaries**
+      e.g. "audit your crons for delivery gaps", "investigate why
+      Y is flaky", "review the incident wiki page for accuracy",
+      "summarize yesterday's meeting". The reply contains a list,
+      table, or findings report — that IS the deliverable.
+    - **Imperatives with a concrete outcome**
+      "please add a footnote to the incident page", "rename X to Y",
+      "add an entry to the wiki", "schedule a meeting with Z".
+    - **Anything with a deadline** or "by X" clause.
+    - **Multi-step work** — if you'll need more than one or two tool
+      calls (shell, file_read, cron_list, etc.) to finish, track it.
+    - **Long replies** — if your reply will contain a list, a table,
+      code, or more than ~3 sentences, it's a deliverable worth a
+      task. A one-line reply is usually a lookup; a structured reply
+      is usually a report.
 
-    - Conversation, acknowledgements, emoji-only messages
-    - Questions with verbal answers (Dan asks, you reply — no
-      deliverable)
-    - Status checks ("are you there?", "did X work?")
-    - Meta-comments about yourself or tools
+    ## When NOT to create a task
+
+    Skip task creation only for genuinely trivial, one-shot exchanges.
+    The canonical examples:
+
+    - **Single-fact lookups** — "what time is it", "what's your
+      Python version", "are you alive", "how's ceph". Answerable
+      in one sentence from memory or one config read.
+    - **Acknowledgements / emoji / meta** — "thanks", "got it",
+      "👍", "how are you doing".
+    - **Status pings** — "are you there?", "did the deploy work?",
+      "still running?".
+    - **Chat about yourself or tools** — Dan is conversing, not
+      asking for output.
+
+    When in doubt, err on the side of creating a task. Closing a
+    trivial task costs one CLI call; losing durable context to chat
+    memory costs a recurrence of the 2026-04-16 isolation-leak
+    pattern, where a three-day-old resolved instruction kept
+    surfacing as a phantom pending task.
 
     ## Workflow
 
