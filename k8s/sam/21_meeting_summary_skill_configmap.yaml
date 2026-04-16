@@ -89,9 +89,9 @@ data:
     You are in an isolated cron session for speakr-daily-summary.
     Run the daily-meeting-summary skill: steps 1 through 5, in order.
     Do not call cron_run — you are already inside the cron job.
-    If step 1 reports zero meetings for today AND no CHANGED sources
-    (late transcripts) are flagged, stop after step 1 and exit cleanly
-    with a one-line status. Otherwise continue through step 5.
+    If step 1's output contains a `NO_CHANGES:` line, your final reply
+    must be literally `NO_REPLY` and nothing else — do not run steps
+    2 through 5. Otherwise continue through step 5.
     ```
 
     ## Workflow
@@ -121,11 +121,15 @@ data:
       [M still processing.] [G summaries flagged as possibly malformed.]
       [New since last run: ...]` — a single period-separated line. N is
       the count of completed recordings for today; the other fields only
-      appear when they apply. If N is 0 AND the script did not also
-      print a `CHANGED sources (late transcripts)` line, there is
-      nothing to process — exit cleanly after this step. If G is
-      non-zero, surface it in your final reply so Dan knows to manually
-      re-summarize those recordings.
+      appear when they apply. If G is non-zero, surface it in your final
+      reply so Dan knows to manually re-summarize those recordings.
+    - `NO_CHANGES: ...` — the script emits this line when there is
+      genuinely nothing to do: zero new meetings, nothing pending, no
+      garbage, no new-since-last-run, no late transcripts, no
+      annotations. When you see this line, your final reply must be
+      literally `NO_REPLY` — no other text, no summary, no surrounding
+      prose. Do not run steps 2 through 5. This keeps the workflow
+      off the LLM budget when there is nothing for Dan to act on.
     - `CHANGED sources (late transcripts): meetings-YYYY-MM-DD.md, ...`
       — these are prior days whose transcripts were not yet available at
       the previous cron run (the previous file was the
@@ -447,10 +451,10 @@ data:
       token. Surface to Dan and stop.
     - Speakr HTTP 5xx or connection error → retry the script once; if it
       fails again, surface to Dan and stop.
-    - Script prints `Wrote 0 meetings` AND no `CHANGED sources (late
-      transcripts)` line → exit cleanly after step 1. Not an error; Dan
-      simply had no meetings that day and nothing recovered from
-      previous days either. If a late-transcripts line IS present you
+    - Script prints `NO_CHANGES:` line → reply with literally `NO_REPLY`
+      and stop. Not an error; Dan simply had no meetings that day and
+      nothing recovered from previous days either. If a late-transcripts
+      line IS present you
       still have work to do — skip today's exec summary but run step
       3 on the named backfill files.
     - Vikunja CLI error on a specific task → log the title, continue
@@ -739,11 +743,13 @@ data:
     #     captured on the first pass).
     late_transcripts = []
     annotated = []
+    primary_result = None
     for target_date in dates_to_fetch:
         result = fetch_date(target_date)
         is_primary = target_date == dates_to_fetch[0]
 
         if is_primary:
+            primary_result = result
             parts = [f'Wrote {result["ok"]} meetings to meetings-{target_date}.md']
             if result['failed']:
                 parts.append(f'{result["failed"]} failed to fetch')
@@ -767,6 +773,24 @@ data:
     if annotated:
         print(f'CHANGED sources (annotated): {", ".join(annotated)}')
         print('Re-distill in Step 5 only — Dan added notes to already-processed meetings.')
+
+    # Short-circuit signal for the cron agent: emit NO_CHANGES when there's
+    # genuinely nothing to process. No new meetings today, none pending, no
+    # garbage to surface, and no prior-day changes (late transcripts or
+    # annotations). Sam's cron prompt treats this line as the signal to
+    # reply with just `NO_REPLY` and skip steps 2-5 entirely.
+    pr = primary_result or {'ok': 0, 'failed': 0, 'pending': 0, 'garbage': 0, 'new': []}
+    nothing_to_do = (
+        pr['ok'] == 0
+        and pr['failed'] == 0
+        and pr['pending'] == 0
+        and pr['garbage'] == 0
+        and not pr['new']
+        and not late_transcripts
+        and not annotated
+    )
+    if nothing_to_do:
+        print('NO_CHANGES: no new meetings today, nothing pending, no prior-day edits. Exit cleanly.')
 
   speakr-transcript.py: |
     #!/usr/bin/env python3
