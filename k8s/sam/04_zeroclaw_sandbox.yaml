@@ -230,6 +230,10 @@ spec:
               mountPath: /data/.zeroclaw/workspace/skills/science-curator/SKILL.md
               subPath: science-curator.md
               readOnly: true
+            - name: skill-science-curator
+              mountPath: /data/.zeroclaw/workspace/skills/science-curator/collect-candidates.py
+              subPath: collect-candidates.py
+              readOnly: true
             - name: skill-browser-navigation
               mountPath: /data/.zeroclaw/workspace/skills/browser-navigation/SKILL.md
               subPath: browser-navigation.md
@@ -302,6 +306,12 @@ spec:
         - name: skill-science-curator
           configMap:
             name: zeroclaw-skill-science-curator
+            items:
+              - key: science-curator.md
+                path: science-curator.md
+              - key: collect-candidates.py
+                path: collect-candidates.py
+                mode: 0755
         - name: skill-browser-navigation
           configMap:
             name: zeroclaw-skill-browser-navigation

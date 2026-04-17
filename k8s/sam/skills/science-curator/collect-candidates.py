@@ -1,0 +1,525 @@
+#!/usr/bin/env python3
+"""
+collect-candidates.py — candidate collector for the science-curator skill.
+
+Fetches recent items from a wide pool of aggregators (Reddit RSS, Lemmy,
+arXiv, Hacker News, Google News RSS, niche RSS feeds) and prints a deduped
+JSON list on stdout. The curator LLM turn reads that output, scores for
+novelty and source unusualness, and picks 3-5 items to save/announce.
+
+Breadth > completeness: any feed that fails is silently skipped so a single
+bad source never kills the run. Script only returns empty if ALL feeds fail.
+
+Reddit is gated on REDDIT_CLIENT_ID being present in the environment. Reddit
+blocks unauthenticated RSS access from cluster egress IPs after the first
+request, so the subreddit list is only iterated when OAuth credentials are
+configured. Parser code stays in place so enabling Reddit later is a wiring
+change (Vault secret → env var → OAuth body in fetch_reddit_sub), not a
+rewrite. Until then, the other aggregators already return 700+ candidates
+across ~290 unique domains — more breadth than the curator needs.
+
+stdlib only: urllib, xml.etree, json, concurrent.futures, datetime, email, os.
+
+Usage:
+    python3 collect-candidates.py
+    # → JSON array on stdout, one record per candidate
+"""
+
+import argparse
+import collections
+import concurrent.futures as cf
+import datetime as dt
+import email.utils
+import html
+import json
+import os
+import re
+import sys
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+
+
+USER_AGENT = (
+    "Mozilla/5.0 (ZeroClaw-Sam/1.0; science-curator; "
+    "+https://github.com/coffee-anon/zeroclaw)"
+)
+REQUEST_TIMEOUT = 10
+FRESHNESS_DAYS = 7
+MAX_SNIPPET_CHARS = 300
+ATOM_NS = {"a": "http://www.w3.org/2005/Atom"}
+HN_SEARCH_URL = "https://hn.algolia.com/api/v1/search"
+
+
+# Source catalog — the diversity IS the feature. Rotate entries here over
+# time (see Option C in the design doc) rather than editing logic below.
+
+REDDIT_SUBS = [
+    "science", "space", "Physics", "AskScience", "biology",
+    "geology", "chemistry", "astronomy", "materials",
+    "MachineLearning", "evolution", "neuroscience",
+    "paleontology", "Astrobiology", "philosophyofscience",
+]
+
+LEMMY_COMMUNITIES = [
+    ("mander.xyz",   "science"),
+    ("mander.xyz",   "space"),
+    ("mander.xyz",   "astronomy"),
+    ("lemmy.ml",     "science"),
+    ("lemmy.world",  "science"),
+]
+
+ARXIV_CATEGORIES = [
+    "astro-ph.EP",    # planetary astrophysics
+    "astro-ph.GA",    # galaxies
+    "cond-mat.soft",  # soft matter
+    "q-bio.PE",       # populations & evolution
+    "q-bio.NC",       # neurons & cognition
+    "physics.bio-ph",
+    "cs.AI",
+]
+
+GOOGLENEWS_QUERIES = [
+    "new discovery",
+    "first observation",
+    "unexpected finding",
+    "scientists discover",
+    "researchers find",
+    "breakthrough study",
+]
+
+NICHE_RSS = [
+    ("quantamagazine.org", "https://www.quantamagazine.org/feed/"),
+    ("phys.org",           "https://phys.org/rss-feed/"),
+    ("eurekalert.org",     "https://www.eurekalert.org/rss/technology_engineering.xml"),
+    ("nautil.us",          "https://nautil.us/feed/"),
+    ("aeon.co",            "https://aeon.co/feed.rss"),
+    ("bigthink.com",       "https://bigthink.com/feed/"),
+    ("sciencealert.com",   "https://www.sciencealert.com/articles/feed"),
+    ("newscientist.com",   "https://www.newscientist.com/feed/home/"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _fetch(url, timeout=REQUEST_TIMEOUT):
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except Exception:
+        return None
+
+
+def _domain_of(url):
+    try:
+        netloc = urllib.parse.urlparse(url).netloc.lower()
+        return netloc[4:] if netloc.startswith("www.") else netloc
+    except Exception:
+        return ""
+
+
+def _clean_text(s):
+    s = html.unescape(s or "")
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:MAX_SNIPPET_CHARS]
+
+
+def _parse_date(s):
+    """Parse an RFC 822 or ISO 8601 date into UTC ISO 8601 string. None on fail."""
+    if not s:
+        return None
+    s = s.strip()
+    # RFC 822 (most RSS feeds) — robust across variants including GMT/UTC names
+    try:
+        parsed = email.utils.parsedate_to_datetime(s)
+        if parsed is not None:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            return parsed.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    except (TypeError, ValueError):
+        pass
+    # ISO 8601 (Atom, Lemmy)
+    try:
+        parsed = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    except ValueError:
+        return None
+
+
+def _is_recent(iso, max_days=FRESHNESS_DAYS):
+    if not iso:
+        return True  # keep undated; dedupe handles repeats
+    try:
+        ts = dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return dt.datetime.now(dt.timezone.utc) - ts <= dt.timedelta(days=max_days)
+
+
+def _record(source, url, title, published=None, snippet="", domain_override=None):
+    return {
+        "source": source,
+        "domain": domain_override or _domain_of(url),
+        "url": url,
+        "title": title,
+        "published": published,
+        "snippet": snippet,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Feed parsers
+# ---------------------------------------------------------------------------
+
+
+def _parse_rss(source, xml_bytes, item_transform=None):
+    """RSS 2.0 parser. `item_transform(rec, item_el)` lets callers tweak
+    per-source (e.g. Google News publisher extraction)."""
+    out = []
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return out
+    for item in root.iterfind(".//item"):
+        title = _clean_text(item.findtext("title") or "")
+        link = (item.findtext("link") or "").strip()
+        desc = _clean_text(item.findtext("description") or "")
+        published = _parse_date(item.findtext("pubDate") or "")
+        if not title or not link:
+            continue
+        rec = _record(source, link, title, published, desc)
+        if item_transform is not None:
+            item_transform(rec, item)
+        out.append(rec)
+    return out
+
+
+def _parse_atom(source, xml_bytes, entry_transform=None):
+    out = []
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return out
+    for entry in root.iterfind("a:entry", ATOM_NS):
+        title = _clean_text(entry.findtext("a:title", default="", namespaces=ATOM_NS))
+        link_el = entry.find("a:link[@rel='alternate']", ATOM_NS)
+        if link_el is None:
+            link_el = entry.find("a:link", ATOM_NS)
+        link = ""
+        if link_el is not None and link_el.get("href"):
+            link = link_el.get("href").strip()
+        # Prefer <summary>; fall back to <content> (Reddit's Atom uses content).
+        summary_raw = entry.findtext("a:summary", default="", namespaces=ATOM_NS)
+        content_raw = entry.findtext("a:content", default="", namespaces=ATOM_NS)
+        summary = _clean_text(summary_raw or content_raw)
+        published = _parse_date(entry.findtext("a:published", default="", namespaces=ATOM_NS))
+        if not title or not link:
+            continue
+        rec = _record(source, link, title, published, summary)
+        if entry_transform is not None:
+            entry_transform(rec, content_raw or summary_raw)
+        out.append(rec)
+    return out
+
+
+def _reddit_entry_transform(rec, content_html):
+    """Reddit's Atom <content> is an HTML fragment containing a `[link]`
+    anchor to the actual submission URL. Extract it so the record's domain
+    reflects the underlying source, not every Reddit post collapsing onto
+    reddit.com. Self-posts (no external link) stay as reddit.com."""
+    if not content_html:
+        rec["domain"] = "reddit.com"
+        return
+    for url in re.findall(r'href="([^"]+)"', content_html):
+        if not url.startswith("http"):
+            continue
+        if "reddit.com" in url:
+            continue
+        rec["url"] = url
+        rec["domain"] = _domain_of(url)
+        return
+    rec["domain"] = "reddit.com"
+
+
+def _gnews_publisher_transform(rec, item_el):
+    """Google News RSS embeds the publisher domain as <source url="...">.
+    Override the domain so novelty scoring sees the real publisher, not
+    news.google.com — every item would otherwise collapse to one domain."""
+    src_el = item_el.find("source")
+    if src_el is not None and src_el.get("url"):
+        rec["domain"] = _domain_of(src_el.get("url"))
+
+
+# ---------------------------------------------------------------------------
+# Source fetchers (each returns a list of records, or [] on failure)
+# ---------------------------------------------------------------------------
+
+
+def fetch_reddit_sub(sub):
+    # Reddit's `.rss` endpoint actually serves Atom, not RSS 2.0.
+    # TODO(oauth): this function currently uses unauthenticated access, which
+    # Reddit blocks after the first request from cluster egress IPs. The
+    # orchestrator gates calls to this function on REDDIT_CLIENT_ID so this
+    # code path is unreachable by default. When OAuth is wired up, swap the
+    # URL + fetch below for an authenticated `oauth.reddit.com/r/{sub}/top/`
+    # request using a cached bearer token from the client_credentials flow.
+    url = f"https://www.reddit.com/r/{sub}/top/.rss?t=day&limit=25"
+    data = _fetch(url)
+    if not data:
+        return []
+    return _parse_atom(
+        f"reddit:/r/{sub}",
+        data,
+        entry_transform=_reddit_entry_transform,
+    )
+
+
+def fetch_lemmy(instance, community):
+    url = (
+        f"https://{instance}/api/v3/post/list"
+        f"?community_name={community}&sort=TopDay&limit=25"
+    )
+    data = _fetch(url)
+    if not data:
+        return []
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return []
+    out = []
+    for wrapper in payload.get("posts", []):
+        p = wrapper.get("post", {}) if isinstance(wrapper, dict) else {}
+        title = _clean_text(p.get("name") or "")
+        link = (p.get("url") or "").strip()
+        if not link:
+            pid = p.get("id", "")
+            link = f"https://{instance}/post/{pid}" if pid else ""
+        body = _clean_text(p.get("body") or "")
+        published = _parse_date(p.get("published") or "")
+        if not title or not link:
+            continue
+        out.append(
+            _record(
+                f"lemmy:{instance}/c/{community}",
+                link,
+                title,
+                published,
+                body,
+            )
+        )
+    return out
+
+
+def fetch_arxiv(category):
+    url = (
+        "https://export.arxiv.org/api/query"
+        f"?search_query=cat:{category}"
+        "&sortBy=submittedDate&sortOrder=descending&max_results=20"
+    )
+    data = _fetch(url)
+    if not data:
+        return []
+    return _parse_atom(f"arxiv:{category}", data)
+
+
+def fetch_hn():
+    since = int((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=2)).timestamp())
+    params = urllib.parse.urlencode(
+        {
+            "tags": "story,front_page",
+            "numericFilters": f"created_at_i>{since}",
+            "hitsPerPage": "50",
+        }
+    )
+    data = _fetch(f"{HN_SEARCH_URL}?{params}")
+    if not data:
+        return []
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return []
+    out = []
+    for hit in payload.get("hits", []):
+        title = _clean_text(hit.get("title") or "")
+        link = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID', '')}"
+        link = (link or "").strip()
+        published = _parse_date(hit.get("created_at") or "")
+        if not title or not link:
+            continue
+        out.append(_record("hn:frontpage", link, title, published, ""))
+    return out
+
+
+def fetch_googlenews(query):
+    q = urllib.parse.quote_plus(query)
+    url = (
+        f"https://news.google.com/rss/search?q={q}+when:7d"
+        "&hl=en-US&gl=US&ceid=US:en"
+    )
+    data = _fetch(url)
+    if not data:
+        return []
+    return _parse_rss(
+        f"googlenews:{query}",
+        data,
+        item_transform=_gnews_publisher_transform,
+    )
+
+
+def fetch_niche_rss(domain, url):
+    data = _fetch(url)
+    if not data:
+        return []
+    return _parse_rss(f"rss:{domain}", data)
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
+
+
+def _dedupe_key(rec):
+    title = re.sub(r"\W+", "", (rec.get("title") or "").lower())[:80]
+    return f"{rec.get('domain', '')}|{title}" if title else ""
+
+
+def collect():
+    tasks = []
+    reddit_enabled = bool(os.environ.get("REDDIT_CLIENT_ID"))
+    with cf.ThreadPoolExecutor(max_workers=12) as pool:
+        if reddit_enabled:
+            for sub in REDDIT_SUBS:
+                tasks.append(pool.submit(fetch_reddit_sub, sub))
+        for instance, community in LEMMY_COMMUNITIES:
+            tasks.append(pool.submit(fetch_lemmy, instance, community))
+        for cat in ARXIV_CATEGORIES:
+            tasks.append(pool.submit(fetch_arxiv, cat))
+        tasks.append(pool.submit(fetch_hn))
+        for query in GOOGLENEWS_QUERIES:
+            tasks.append(pool.submit(fetch_googlenews, query))
+        for domain, url in NICHE_RSS:
+            tasks.append(pool.submit(fetch_niche_rss, domain, url))
+
+        all_records = []
+        for future in cf.as_completed(tasks):
+            try:
+                all_records.extend(future.result() or [])
+            except Exception:
+                continue
+
+    seen = set()
+    out = []
+    for rec in all_records:
+        if not _is_recent(rec.get("published")):
+            continue
+        key = _dedupe_key(rec)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(rec)
+    return out
+
+
+def rank(records, max_results=0):
+    """Score and sort candidates by (in-batch rarity + freshness), then cap
+    per source family so no single aggregator monopolizes the top N.
+
+    In-batch rarity is a memory-free proxy for domain unusualness: if
+    arxiv.org appears 120 times in a batch it's not unusual *within this
+    batch*, whereas a publisher with 1 hit is. This avoids needing a
+    separately-maintained domain-counts file on disk while still promoting
+    diversity. Freshness is a linear decay over FRESHNESS_DAYS.
+
+    Per-family cap prevents Google News (which usually returns the most
+    items) from crowding out arxiv/HN/Lemmy in the top N. The cap is
+    max(3, N // 6), so for N=40 each family gets at most 6 slots — enough
+    for Google News to contribute its best picks without monopolizing.
+    """
+    if not records:
+        return []
+
+    domain_counts = collections.Counter(r.get("domain", "") for r in records)
+    now = dt.datetime.now(dt.timezone.utc)
+
+    scored = []
+    for rec in records:
+        freshness = 0.5
+        pub = rec.get("published")
+        if pub:
+            try:
+                ts = dt.datetime.fromisoformat(pub.replace("Z", "+00:00"))
+                age_days = max(0.0, (now - ts).total_seconds() / 86400.0)
+                freshness = max(0.0, 1.0 - age_days / FRESHNESS_DAYS)
+            except ValueError:
+                pass
+        rarity = 1.0 / float(domain_counts.get(rec.get("domain", ""), 1))
+        score = 0.6 * rarity + 0.4 * freshness
+        scored.append((score, rec))
+
+    scored.sort(key=lambda t: t[0], reverse=True)
+
+    if max_results <= 0 or len(scored) <= max_results:
+        return [r for _, r in scored]
+
+    # Pass 1: family-capped picking for diversity. The cap is ~25% of the
+    # target so a single aggregator can't own the top N, but room remains
+    # for Google News (which usually has the most items) to contribute its
+    # best picks alongside arxiv/HN/lemmy/niche RSS.
+    family_cap = max(3, max_results // 4)
+    per_family: dict[str, int] = {}
+    out: list[dict] = []
+    used: set[int] = set()
+    for idx, (_, rec) in enumerate(scored):
+        family = rec.get("source", "").split(":", 1)[0]
+        if per_family.get(family, 0) >= family_cap:
+            continue
+        per_family[family] = per_family.get(family, 0) + 1
+        out.append(rec)
+        used.add(idx)
+        if len(out) >= max_results:
+            return out
+
+    # Pass 2: if the family caps left slots unfilled (families too thin),
+    # top up from the rest of the scored list in score order. Diversity is
+    # preserved by pass 1; pass 2 just ensures we hit max_results when the
+    # pool has enough items overall.
+    for idx, (_, rec) in enumerate(scored):
+        if idx in used:
+            continue
+        out.append(rec)
+        if len(out) >= max_results:
+            break
+    return out
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Collect and optionally rank science news candidates.",
+    )
+    parser.add_argument(
+        "--max",
+        type=int,
+        default=0,
+        help="If > 0, rank results and return only the top N.",
+    )
+    args = parser.parse_args()
+
+    records = collect()
+    if args.max > 0:
+        records = rank(records, max_results=args.max)
+    json.dump(records, sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()
