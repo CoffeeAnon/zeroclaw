@@ -50,14 +50,22 @@ data:
       vikunja my-task done   <id> [--comment "..."]
       vikunja my-task note   <id> "<comment>"
 
+      vikunja team-tasks [--open] [--sort position|priority|due] [--format text|json]
+                                                    List tasks in the Sam-Walter shared project
+      vikunja team-task create "<title>" [--description ...] [--priority 1-5] [--due YYYY-MM-DD]
+      vikunja team-task show   <id>
+      vikunja team-task done   <id> [--comment "..."]
+      vikunja team-task note   <id> "<comment>"
+
       vikunja help                                  Top-level help
       vikunja help <command>                        Per-command help
       vikunja <command> --help                      Same (works on any subcommand)
 
     Environment:
-      VIKUNJA_API_TOKEN       — JWT token for the sam user (required)
-      VIKUNJA_BASE_URL        — Vikunja URL (default: http://vikunja.todolist.svc.cluster.local:3456)
-      VIKUNJA_SAM_PROJECT_ID  — Project ID for Sam's inbox (default: 3)
+      VIKUNJA_API_TOKEN         — JWT token for the sam user (required)
+      VIKUNJA_BASE_URL          — Vikunja URL (default: http://vikunja.todolist.svc.cluster.local:3456)
+      VIKUNJA_SAM_PROJECT_ID    — Project ID for Sam's inbox (default: 3)
+      VIKUNJA_TEAM_PROJECT_ID   — Project ID for the Sam-Walter shared board (e.g. 7)
     """
     import json
     import os
@@ -70,6 +78,7 @@ data:
     API_URL = f"{BASE_URL}/api/v1"
     TOKEN = os.environ.get("VIKUNJA_API_TOKEN", "")
     SAM_PROJECT_ID = os.environ.get("VIKUNJA_SAM_PROJECT_ID", "3")
+    TEAM_PROJECT_ID = os.environ.get("VIKUNJA_TEAM_PROJECT_ID", "")
 
 
     class VikunjaError(Exception):
@@ -360,6 +369,51 @@ data:
             '\n'
             '  Append a progress comment to a task without marking it done.\n'
         ),
+        "team-tasks": (
+            'Usage: vikunja team-tasks [--open] [--sort position|priority|due] [--format text|json]\n'
+            '\n'
+            '  List tasks in the Sam-Walter shared project (VIKUNJA_TEAM_PROJECT_ID, e.g. #7).\n'
+            '\n'
+            'Flags:\n'
+            '  --open           Only show undone tasks.\n'
+            '  --sort FIELD     position (default), priority (highest first), due (earliest first)\n'
+            '  --format FORMAT  text (default) or json (machine-readable, full task records)\n'
+        ),
+        "team-task": (
+            'Usage: vikunja team-task <subcommand> ...\n'
+            '\n'
+            'Subcommands:\n'
+            '  create  Create a task in the Sam-Walter shared project\n'
+            '  show    Show full details for a task in the shared project\n'
+            '  done    Mark a task done (optionally with a closing comment)\n'
+            '  note    Append a progress comment without closing\n'
+            '\n'
+            'Examples:\n'
+            '  vikunja team-task create "Deploy monitoring dashboard" --priority 3 --due 2026-04-20\n'
+            '  vikunja team-task show 42\n'
+            '  vikunja team-task done 42 --comment "Deployed and verified."\n'
+            '  vikunja team-task note 42 "Blocked on network config"\n'
+        ),
+        "team-task create": (
+            'Usage: vikunja team-task create "<title>" [--description "..."] [--priority 1-5] [--due YYYY-MM-DD]\n'
+            '\n'
+            '  Create a task in the Sam-Walter shared project (VIKUNJA_TEAM_PROJECT_ID, e.g. #7).\n'
+        ),
+        "team-task show": (
+            'Usage: vikunja team-task show <id>\n'
+            '\n'
+            '  Show full details for a task in the Sam-Walter shared project.\n'
+        ),
+        "team-task done": (
+            'Usage: vikunja team-task done <id> [--comment "..."]\n'
+            '\n'
+            '  Mark a task done. Optionally attach a closing comment in the same call.\n'
+        ),
+        "team-task note": (
+            'Usage: vikunja team-task note <id> "<comment>"\n'
+            '\n'
+            '  Append a progress comment to a task without marking it done.\n'
+        ),
     }
 
 
@@ -399,6 +453,28 @@ data:
             print(
                 f"ERROR: VIKUNJA_SAM_PROJECT_ID must be an integer "
                 f"(got: {SAM_PROJECT_ID!r}). Set it in the pod env block.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+
+    def team_project_id():
+        """Return the configured project ID for the Sam-Walter shared board,
+        or exit with a descriptive error if it is missing or not numeric."""
+        if not TEAM_PROJECT_ID:
+            print(
+                "ERROR: VIKUNJA_TEAM_PROJECT_ID is not set. The team-* "
+                "commands require a shared project ID; set it in the pod "
+                "env block (e.g. 7 for 'Sam & Walter ops').",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        try:
+            return int(TEAM_PROJECT_ID)
+        except (TypeError, ValueError):
+            print(
+                f"ERROR: VIKUNJA_TEAM_PROJECT_ID must be an integer "
+                f"(got: {TEAM_PROJECT_ID!r}).",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -573,6 +649,96 @@ data:
 
         print(
             "Usage: vikunja my-task {create|show|done|note} <args>",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+    def cmd_team_tasks(args):
+        """List tasks in the Sam-Walter shared board. Thin wrapper over
+        cmd_tasks that injects the project ID from VIKUNJA_TEAM_PROJECT_ID.
+        """
+        _check_help(args, "team-tasks")
+        flags, _ = _parse_args(args, {"sort": "str", "format": "str", "open": "bool"})
+        delegate_args = [str(team_project_id())]
+        delegate_args += ["--sort", flags.get("sort", "position")]
+        delegate_args += ["--format", flags.get("format", "text")]
+        if flags.get("open"):
+            delegate_args.append("--open")
+        return cmd_tasks(delegate_args)
+
+
+    def cmd_team_task(args):
+        """Dispatcher for `vikunja team-task <sub> ...`. Subs:
+          create <title> [--description ...] [--priority N] [--due YYYY-MM-DD]
+          show   <id>
+          done   <id> [--comment ...]
+          note   <id> <comment>
+        Delegates to existing cmd_task_create / cmd_task_show /
+        cmd_task_update / cmd_task_comment with the shared team project pre-filled.
+        """
+        if not args or args[0] in ("help", "--help", "-h"):
+            print_command_help("team-task")
+            sys.exit(0)
+        sub = args[0]
+        rest = args[1:]
+
+        if sub == "create":
+            flags, positional = _parse_args(rest, {
+                "description": "str", "priority": "str", "due": "str",
+            })
+            if not positional:
+                print(
+                    'Usage: vikunja team-task create "<title>" '
+                    '[--description ...] [--priority 1-5] [--due YYYY-MM-DD]',
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            title = positional[0]
+            delegate_args = [str(team_project_id()), "--title", title]
+            if "description" in flags:
+                delegate_args += ["--description", flags["description"]]
+            if "priority" in flags:
+                delegate_args += ["--priority", flags["priority"]]
+            if "due" in flags:
+                delegate_args += ["--due", flags["due"]]
+            return cmd_task_create(delegate_args)
+
+        if sub == "show":
+            _, positional = _parse_args(rest, {})
+            if not positional:
+                print("Usage: vikunja team-task show <id>", file=sys.stderr)
+                sys.exit(2)
+            return cmd_task_show([positional[0]])
+
+        if sub == "done":
+            flags, positional = _parse_args(rest, {"comment": "str"})
+            if not positional:
+                print("Usage: vikunja team-task done <id> [--comment \"...\"]", file=sys.stderr)
+                sys.exit(2)
+            task_id = positional[0]
+            # cmd_task_update calls sys.exit(1) on API failure, so if we reach
+            # the comment call the update succeeded. Keep these in sequence —
+            # do not refactor cmd_task_update to return an error code without
+            # also adding an explicit success check here.
+            rc = cmd_task_update([task_id, "--done"])
+            if "comment" in flags:
+                cmd_task_comment([task_id, "--body", flags["comment"]])
+            return rc
+
+        if sub == "note":
+            flags, positional = _parse_args(rest, {})
+            if len(positional) < 2:
+                print("Usage: vikunja team-task note <id> \"<comment>\"", file=sys.stderr)
+                sys.exit(2)
+            task_id = positional[0]
+            # Join remaining positionals so unquoted multi-word comments still work
+            # instead of silently truncating to the first token.
+            body = " ".join(positional[1:])
+            return cmd_task_comment([task_id, "--body", body])
+
+        print(
+            "Usage: vikunja team-task {create|show|done|note} <args>",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -1251,6 +1417,10 @@ data:
             cmd_my_tasks(rest)
         elif cmd == "my-task":
             cmd_my_task(rest)
+        elif cmd == "team-tasks":
+            return cmd_team_tasks(rest)
+        elif cmd == "team-task":
+            return cmd_team_task(rest)
         else:
             print(f"Unknown command: {cmd}", file=sys.stderr)
             print(__doc__)
