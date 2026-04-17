@@ -48,6 +48,7 @@ data:
       max_cost_per_day_cents = 500
       require_approval_for_medium_risk = false
       block_high_risk_commands = false
+      allow_shell_redirections = true
       non_cli_excluded_tools = [
           # Admin/config tools — not needed for a multipurpose agent
           "model_routing_config",
