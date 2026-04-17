@@ -10,7 +10,7 @@ data:
   team-coordination.md: |
     ---
     name: team-coordination
-    version: 1.0.0
+    version: 1.1.0
     description: >
       Coordination surface between Sam and Walter via Vikunja project #7
       (Sam & Walter ops). Always resident — consult on every session
@@ -20,143 +20,161 @@ data:
 
     # Team Coordination
 
-    You share a Vikunja project with your counterpart:
-    - **Sam** is Signal-facing; she takes asks from Dan and delegates
-      code/k8s work to Walter.
-    - **Walter** is Gitea/k8s-facing; he runs via ACP (`acp-client`)
-      from Sam, ships PRs, and reports results back.
+    You share a Vikunja board with your counterpart (project #7,
+    "Sam & Walter ops"). The task description is the work spec.
+    The close-comment is the deliverable. Both sides can audit the
+    board at any time, so the handoff is durable even if your
+    session ends, times out, or gets interrupted.
 
-    The shared board (`VIKUNJA_TEAM_PROJECT_ID`, project #7 in this
-    cluster) is your durable handoff surface. The task description is
-    the work spec. The close-comment is the findings. Both sides can
-    audit the history at any time.
+    - **Sam** takes asks from Dan via Signal, delegates code/k8s
+      work to Walter via this board + ACP.
+    - **Walter** receives ACP sessions from Sam, reads the board
+      for specs, ships results (usually PRs), and closes tasks
+      with findings.
 
     ## If you are Sam
 
-    **When Dan asks you for something that needs code / k8s / PR work:**
+    Your `task-tracking` skill handles the parent task in your inbox
+    (my-task). This skill handles the Walter delegation — the
+    team-task and the ACP dispatch.
 
-    1. Create the parent task in YOUR inbox with `vikunja my-task create
-       ...` (as usual — that's task-tracking skill's domain).
-    2. Create a DELEGATION task in the shared board:
-       `vikunja team-task create "<spec for Walter>" --description "<full
-       context: what, why, acceptance criteria, links to Dan's message
-       if helpful>"`. Capture the team-task ID.
-    3. Dispatch Walter via ACP:
-       `acp-client send "<brief instruction + team-task #N>"`.
-       Walter will start, read task #N, do the work, close it.
-    4. Poll: `acp-client poll <session_id>` every 30-60s until
-       COMPLETE, and `vikunja team-task show <N>` after completion to
-       read Walter's close-comment.
-    5. Note Walter's PR URL / findings on your OWN task
-       (`vikunja my-task note <parent-id> "Walter finished in
-       team-task #N, PR: https://..."`), then close your parent task
-       and reply to Dan.
+    **When Dan's ask needs code, k8s, or PR work:**
 
-    **When to delegate to Walter vs. do it yourself:** if the work
-    produces a PR, touches the cluster, or requires k8s/gitea tooling
-    Walter has (and you don't), delegate. Short research, wiki edits,
-    Vikunja work, and Signal-facing replies stay with you.
+    Step 1 — Create the delegation spec:
+    ```
+    vikunja team-task create "<what Walter should do>" \
+      --description "<full context: what, why, acceptance criteria>"
+    ```
+
+    Step 2 — Fire and forget:
+    ```
+    acp-client send "Team-task #N — see the description for details."
+    ```
+    Do NOT poll. Walter takes 3-10 minutes. Your turn will time out
+    or get interrupted if you wait. The Vikunja board is how you get
+    the result back — not the ACP session buffer.
+
+    Step 3 — Reply to Dan immediately:
+    *"Dispatched to Walter (team-task #N). I'll check back when
+    he's done."*
+
+    **On your next turn (or when Dan asks for status):**
+    ```
+    vikunja team-tasks
+    ```
+    If Walter closed the task, read his comment with
+    `vikunja team-task show <id>`, relay findings to Dan, and close
+    your parent task (`vikunja my-task done <parent> --comment "..."`).
+
+    If the task is still open, tell Dan Walter is still working.
+
+    **Close the team-task yourself if Walter can't.** If Walter hits
+    an error (RBAC, timeout, crash), you still have the result in
+    his ACP reply or your Signal conversation. Close the team-task
+    with whatever you know:
+    ```
+    vikunja team-task done <id> --comment "Walter hit RBAC wall on
+    llama namespace. Relayed to Dan. Needs RoleBinding fix."
+    ```
+    Never leave a team-task open when you already have the answer —
+    open tasks look like pending work to future sessions.
+
+    **When to delegate vs do it yourself:** if the work produces a
+    PR, touches the cluster, or requires k8s/Gitea tooling, delegate.
+    Research, wiki edits, Vikunja work, and Signal replies stay with
+    you.
 
     ## If you are Walter
 
-    **At the start of EVERY ACP session, your first action is:**
+    **First action on EVERY ACP session:**
 
     ```
     vikunja team-tasks --open
     ```
 
-    Usually there's one newly-created task matching Sam's message.
-    If Sam's message references a specific task ID ("team-task #42"),
-    read that one. If multiple open tasks exist and it's unclear which
-    Sam means, pick the most recent and note your choice in a comment
-    so Sam can correct if wrong.
+    Match Sam's ACP message to an open task. If she references a
+    task ID ("team-task #42"), read that one. If multiple are open,
+    pick the most recent.
 
     **Workflow:**
 
-    1. `vikunja team-task show <id>` — read the description (spec).
-    2. Do the work. This usually ends in a PR on Gitea.
-    3. `vikunja team-task done <id> --comment "<findings + PR URL +
-       any caveats>"`. This is what Sam reads when relaying to Dan.
-    4. Reply via ACP with a short summary. The comment has detail;
-       the ACP reply is a pointer.
+    1. `vikunja team-task show <id>` — read the spec.
+    2. Do the work.
+    3. Close BEFORE replying to ACP:
+       ```
+       vikunja team-task done <id> --comment "<findings + PR URL>"
+       ```
+       This comment is what Sam reads when relaying to Dan. Make it
+       self-contained — Sam may read it hours later in a different
+       session.
+    4. Reply via ACP with a short pointer. The comment has detail.
+
+    **Close even on failure.** If you hit a permission error, missing
+    resource, or any blocker, close the task with the error:
+    ```
+    vikunja team-task done <id> --comment "BLOCKED: RBAC — service
+    account lacks get on deployments.apps in llama namespace."
+    ```
+    An open task with a failure comment is better than a stale TODO
+    that looks like pending work.
 
     **Upward escalation:** if you discover something outside the
-    delegated task that needs Sam's or Dan's attention (e.g., a
-    flaky deployment, a missing permission, a stale dependency),
-    open a NEW team-task yourself:
-
+    delegated task, open a NEW team-task:
     ```
-    vikunja team-task create "<concise ask>" --description "<what you
-    found, why it matters, who should look at it>"
+    vikunja team-task create "<what you found>" \
+      --description "<why it matters, who should look at it>"
     ```
-
-    Sam sees it on her next team-tasks check. Don't escalate
-    inside the close-comment of the task you were given — that
-    gets lost. Separate tasks keep separate concerns.
+    Sam sees it on her next check. Don't bury escalations inside
+    another task's close-comment �� separate tasks for separate
+    concerns.
 
     ## Worked example
 
-    Dan → Sam (Signal): *"Can you get Walter to close out the stale
-    zeroclaw-sam tag in Gitea — there's a v1.5.0 without notes."*
+    Dan → Sam: *"Have Walter check the todolist deployment image."*
 
     Sam:
     ```
-    $ vikunja my-task create "Close stale zeroclaw-sam:v1.5.0 tag note" \
-        --description "Dan wants a release note or proper deletion"
-    Task #127 created
-    $ vikunja team-task create "Audit Gitea for missing release notes on zeroclaw-sam tags" \
-        --description "Dan noticed v1.5.0 has no release notes. Either add one, or deprecate the tag. Preferred: add notes referencing the nearest commit."
-    Task #128 created
-    $ acp-client send "Team-task #128 — see description. Take your time."
+    $ vikunja team-task create "Check todolist deployment image version" \
+        --description "Dan wants the current image tag for the vikunja deployment in todolist namespace."
+    Task #130 created
+    $ acp-client send "Team-task #130 — check the todolist deployment image version."
     PENDING acp_session_id=abc123
-    # ... poll every 60s ...
-    $ acp-client poll abc123
-    COMPLETE
-    $ vikunja team-task show 128
-    [DONE] with comment: "Added release notes for v1.5.0 via PR gitea.example/zeroclaw/pulls/42. Tagged commit 2f071808."
-    $ vikunja my-task note 127 "Walter closed team-task #128: PR #42 merged"
-    $ vikunja my-task done 127 --comment "PR merged: https://gitea.example/zeroclaw/pulls/42"
-    Reply to Dan: "Done. Walter added release notes; PR 42 merged."
     ```
+    Reply to Dan: *"Dispatched to Walter (team-task #130)."*
 
-    Walter (inside the ACP session for team-task #128):
+    Walter (ACP session):
     ```
     $ vikunja team-tasks --open
-      #128 [TODO] Audit Gitea for missing release notes ...
-    $ vikunja team-task show 128
-    [... reads description ...]
-    # does the work on Gitea, opens PR #42
-    $ vikunja team-task done 128 \
-        --comment "Added release notes for v1.5.0 via PR gitea.example/zeroclaw/pulls/42. Tagged commit 2f071808."
-    # replies to ACP: "PR #42 opened with release notes for v1.5.0."
+      #130 [TODO] Check todolist deployment image version
+    $ vikunja team-task show 130
+    $ kubectl get deploy -n todolist vikunja -o jsonpath='{.spec.template.spec.containers[0].image}'
+    vikunja/vikunja:0.24.6
+    $ vikunja team-task done 130 --comment "vikunja/vikunja:0.24.6"
     ```
+
+    Sam (next turn):
+    ```
+    $ vikunja team-tasks
+      #130 [DONE] Check todolist deployment image version
+    $ vikunja team-task show 130
+    ```
+    Reply to Dan: *"Walter confirmed: vikunja/vikunja:0.24.6."*
 
     ## CLI reference
 
-    Both agents use the same surface:
-
     ```
     vikunja team-tasks [--open] [--format text|json]
-    vikunja team-task create "<title>" [--description ...] [--priority 1-5] [--due YYYY-MM-DD]
+    vikunja team-task create "<title>" [--description ...] [--priority 1-5]
     vikunja team-task show   <id>
     vikunja team-task done   <id> [--comment "..."]
     vikunja team-task note   <id> "<progress>"
     ```
 
-    Project ID is baked in via `VIKUNJA_TEAM_PROJECT_ID`.
-
     ## Failure modes
 
-    - ACP session timing out while Walter is still working → Sam
-      should `acp-client poll` again; Walter's progress is in the
-      task's comments/notes, not the ACP session buffer.
-    - Walter starts a session with no open team-tasks → probably a
-      stale ACP retry; reply "no task in team board — please
-      re-delegate if this is new work" and end the session.
-    - Task title collision (two tasks sound similar) → use the
-      numeric ID Sam references in the ACP message; the ID is the
-      source of truth, the title is a human hint.
-    - PR merge is blocked (CI, review) → Walter closes the
-      team-task with `--comment "PR opened but merge blocked: <why>.
-      Needs Sam/Dan."` rather than leaving it open — closing with
-      an explicit blocker is cleaner than a stale TODO.
+    - Walter starts with no open team-tasks → stale ACP retry.
+      Reply "no task in team board" and end the session.
+    - ACP session times out before Walter finishes → the team-task
+      stays open; Sam checks `team-tasks` on her next turn.
+    - Walter can't complete (RBAC, missing resource) → close with
+      the error in the comment. Don't leave it open.
