@@ -4809,6 +4809,16 @@ async fn run_message_dispatch_loop(
                             sender = %msg.sender,
                             "mid-turn injection: queued message for active loop"
                         );
+                        // Signal message arriving mid-turn — preempt any running cron
+                        // sessions so the interactive session gets priority.
+                        if msg.channel == "signal" {
+                            let cancelled = crate::cron::active_jobs::cancel_all();
+                            if cancelled > 0 {
+                                tracing::info!(
+                                    "Preempted {cancelled} cron job(s) for Signal injection"
+                                );
+                            }
+                        }
                         // Acknowledge with 👀 reaction so user knows it was received
                         if let Some(channel) = ctx.channels_by_name.get(&msg.channel) {
                             let _ = channel
@@ -4820,6 +4830,17 @@ async fn run_message_dispatch_loop(
                     // tx.send failed — receiver dropped (loop just ended).
                     // Fall through to normal dispatch.
                 }
+            }
+        }
+
+        // Signal message arriving as a fresh dispatch — preempt any running cron
+        // sessions so the human gets immediate attention.
+        if msg.channel == "signal" {
+            let cancelled = crate::cron::active_jobs::cancel_all();
+            if cancelled > 0 {
+                tracing::info!(
+                    "Preempted {cancelled} cron job(s) for incoming Signal message"
+                );
             }
         }
 

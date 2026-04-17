@@ -983,6 +983,7 @@ async fn main() -> Result<()> {
                 interactive,
                 None,
                 None,
+                None, // cancellation_token — CLI, no preemption
             ))
             .await
             .map(|_| ())

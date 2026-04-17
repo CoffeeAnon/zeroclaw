@@ -6,8 +6,10 @@ use crate::channels::{
     Channel, DingTalkChannel, DiscordChannel, EmailChannel, MattermostChannel, NapcatChannel,
     QQChannel, SendMessage, SlackChannel, TelegramChannel, WhatsAppChannel,
 };
+use crate::agent::loop_::is_tool_loop_cancelled;
 use crate::config::Config;
 use crate::cron::{
+    active_jobs,
     due_jobs, next_run_for_schedule, record_last_run, record_run, remove_job, reschedule_after_run,
     update_job, CronJob, CronJobPatch, DeliveryConfig, JobType, Schedule, SessionTarget,
 };
@@ -242,6 +244,11 @@ async fn run_agent_job(
         SessionTarget::Main => None,
     };
 
+    // Register a cancellation token so Signal messages can preempt this cron
+    // session. The task queue is durable (Vikunja), so cancellation just means
+    // "retry on next cron fire" — no work is lost.
+    let cancellation_token = active_jobs::register(&job.id);
+
     let run_result = Box::pin(crate::agent::run(
         config.clone(),
         Some(prefixed_prompt),
@@ -252,8 +259,12 @@ async fn run_agent_job(
         false,
         None,
         session_id,
+        Some(cancellation_token.clone()),
     ))
     .await;
+
+    // Always deregister, whether the job succeeded, failed, or was cancelled
+    active_jobs::deregister(&job.id);
 
     match run_result {
         Ok(response) => (
@@ -264,6 +275,14 @@ async fn run_agent_job(
                 response
             },
         ),
+        Err(ref e) if is_tool_loop_cancelled(e) => {
+            tracing::info!(
+                "Cron job '{}' ({}) preempted by interactive message",
+                name,
+                job.id
+            );
+            (true, "preempted by interactive message".to_string())
+        }
         Err(e) => (false, format!("agent job failed: {e}")),
     }
 }

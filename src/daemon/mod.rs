@@ -268,6 +268,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 false,
                 None,
                 None,
+                None, // cancellation_token — heartbeat tasks, no preemption
             ))
             .await
             {

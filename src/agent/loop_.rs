@@ -2859,6 +2859,7 @@ pub async fn run(
     interactive: bool,
     hooks: Option<&crate::hooks::HookRunner>,
     session_id: Option<String>,
+    cancellation_token: Option<CancellationToken>,
 ) -> Result<String> {
     if let Err(error) = crate::plugins::runtime::initialize_from_config(&config.plugins) {
         tracing::warn!("plugin registry initialization skipped: {error}");
@@ -3223,7 +3224,7 @@ pub async fn run(
                                         channel_name,
                                         &config.multimodal,
                                         config.agent.max_tool_iterations,
-                                        None,
+                                        cancellation_token.clone(),
                                         None,
                                         effective_hooks,
                                         &[],
