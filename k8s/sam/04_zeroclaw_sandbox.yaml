@@ -82,7 +82,7 @@ spec:
             # Skills are mounted directly into the zeroclaw container, not here.
       containers:
         - name: zeroclaw
-          image: citizendaniel/zeroclaw-sam:v1.5.15
+          image: gitea.coffee-anon.com/dan/zeroclaw-sam:v1.5.16
           imagePullPolicy: IfNotPresent
           command:
             - bash
