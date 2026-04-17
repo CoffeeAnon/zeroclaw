@@ -57,6 +57,7 @@ spec:
               mkdir -p /data/.zeroclaw/workspace/skills/cron-management
               mkdir -p /data/.zeroclaw/workspace/skills/wiki-management
               mkdir -p /data/.zeroclaw/workspace/skills/task-tracking
+              mkdir -p /data/.zeroclaw/workspace/skills/team-coordination
           securityContext:
             runAsUser: 0
             runAsGroup: 0
@@ -158,6 +159,8 @@ spec:
               value: "http://vikunja.todolist.svc.cluster.local:3456"
             - name: VIKUNJA_SAM_PROJECT_ID
               value: "3"
+            - name: VIKUNJA_TEAM_PROJECT_ID
+              value: "7"
             - name: ACP_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -243,6 +246,10 @@ spec:
               mountPath: /data/.zeroclaw/workspace/skills/task-tracking/SKILL.md
               subPath: task-tracking.md
               readOnly: true
+            - name: skill-team-coordination
+              mountPath: /data/.zeroclaw/workspace/skills/team-coordination/SKILL.md
+              subPath: team-coordination.md
+              readOnly: true
         - name: signal-api-adapter
           image: citizendaniel/signal-api-adapter:v1.3.0
           imagePullPolicy: Always
@@ -307,6 +314,9 @@ spec:
         - name: skill-task-tracking
           configMap:
             name: zeroclaw-skill-task-tracking
+        - name: skill-team-coordination
+          configMap:
+            name: zeroclaw-skill-team-coordination
         - name: acp-client
           configMap:
             name: acp-client
