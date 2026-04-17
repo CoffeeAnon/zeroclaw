@@ -52,7 +52,7 @@ data:
       block_high_risk_commands = false
       non_cli_excluded_tools = []
       non_cli_natural_language_approval_mode = "direct"
-      shell_env_passthrough = ["KUBECONFIG", "GIT_CONFIG_GLOBAL", "GITEA_API_TOKEN"]
+      shell_env_passthrough = ["KUBECONFIG", "GIT_CONFIG_GLOBAL", "GITEA_API_TOKEN", "VIKUNJA_API_TOKEN", "VIKUNJA_BASE_URL", "VIKUNJA_TEAM_PROJECT_ID"]
 
       [research]
       trigger = "never"
