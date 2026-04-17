@@ -73,7 +73,19 @@ data:
       trigger = "never"
 
       [reliability]
-      provider_retries = 5
+      # provider_retries absorbs transient transport failures on the assistant-api
+      # path (reqwest "error sending request" on connect/TLS/read). 8 was chosen
+      # after observing a cron run exhaust 6/6 attempts during an upstream blip;
+      # extending the tail is cheap for cron work where latency is acceptable.
+      provider_retries = 8
+      # scheduler_retries is the top-level cron-run retry wrapper (distinct from
+      # provider_retries). 3 gives one extra full-run attempt beyond the default,
+      # which matters when a whole cron fire fails before any self-heal fires.
+      scheduler_retries = 3
+      # connect_timeout default is 10s; raising to 25s absorbs brief upstream
+      # backpressure (LB/istio restarts, litellm queue drain) without capping
+      # long-running requests (request_timeout is still 300s).
+      provider_connect_timeout_secs = 25
 
       [agent]
       max_tool_iterations = 999
@@ -81,7 +93,11 @@ data:
       loop_detection_failure_streak = 10
 
       [heartbeat]
-      enabled = true
+      # Disabled 2026-04-17: heartbeat injects a user-role message mid-turn
+      # that derails multi-step workflows (observed: Sam abandoned a Walter
+      # delegation to acknowledge the heartbeat, lost the task context).
+      # Sam has Signal + cron as liveness signals; heartbeat adds noise.
+      enabled = false
       interval_minutes = 30
 
       [proactive_messaging]
