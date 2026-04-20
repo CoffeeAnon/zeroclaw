@@ -9,10 +9,20 @@ use sqlx::PgPool;
 
 /// Ordered list of (version, sql) pairs. Versions sort lexicographically.
 /// Add new migrations here in date-prefixed order.
-static MIGRATIONS: &[(&str, &str)] = &[(
-    "20260419000001_create_outbox",
-    include_str!("../migrations/20260419000001_create_outbox.sql"),
-)];
+static MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "20260419000001_create_outbox",
+        include_str!("../migrations/20260419000001_create_outbox.sql"),
+    ),
+    (
+        "20260419000002_create_inbox_events",
+        include_str!("../migrations/20260419000002_create_inbox_events.sql"),
+    ),
+    (
+        "20260419000003_create_push_notification_configs",
+        include_str!("../migrations/20260419000003_create_push_notification_configs.sql"),
+    ),
+];
 
 pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(

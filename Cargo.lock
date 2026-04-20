@@ -10365,6 +10365,19 @@ dependencies = [
 name = "zeroclaw-core"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "http-body-util",
+ "ra2a",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+ "zeroclaw-a2a-outbox",
  "zeroclaw-types",
 ]
 
