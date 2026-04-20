@@ -4,12 +4,14 @@ members = [
     "crates/robot-kit",
     "crates/zeroclaw-types",
     "crates/zeroclaw-core",
+    "crates/zeroclaw-a2a-outbox",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 ra2a = "0.10.1"
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "migrate", "macros", "tls-rustls-webpki-roots"] }
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio"] }
+tokio = { version = "1.42", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync"] }
 
 [package]
 name = "zeroclaw"
