@@ -6,3 +6,5 @@
 
 /// Marker constant proving dependency linkage to `zeroclaw-types`.
 pub const CORE_CRATE_ID: &str = zeroclaw_types::CRATE_ID;
+
+pub mod a2a;

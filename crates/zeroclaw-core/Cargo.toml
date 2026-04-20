@@ -10,3 +10,4 @@ path = "src/lib.rs"
 
 [dependencies]
 zeroclaw-types = { path = "../zeroclaw-types" }
+ra2a = { workspace = true }
