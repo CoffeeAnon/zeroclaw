@@ -14,6 +14,35 @@
 
 ---
 
+## Plan Amendments (discovered during execution)
+
+**2026-04-19 — sqlx feature constraints** (supersedes original plan in Tasks 1.1, 1.3, 1.5, 1.6, 1.11):
+
+sqlx 0.8's `uuid`, `chrono`, `migrate`, and `macros` features activate
+`sqlx-sqlite` transitively via Cargo's features2 weak-dep resolution.
+That conflicts with zeroclaw's existing `rusqlite 0.37` (both declare
+`links = "sqlite3"`, incompatible `libsqlite3-sys` pins). sqlx 0.7 has
+the same issue.
+
+The workspace therefore uses the truly-minimal feature set:
+
+```toml
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+```
+
+**Consequences for subsequent tasks:**
+
+- **Tasks 1.3, 1.5, 1.6, 1.11** — replace all `sqlx::query!(...)` calls with runtime-checked `sqlx::query_as::<_, T>(sql).bind(...).fetch_*()` or `sqlx::query(sql).bind(...).execute()`. Replace `sqlx::query_scalar!` with `sqlx::query_scalar::<_, T>(sql)`.
+- **Task 1.3 (`OutboxRecord`)** — do NOT rely on the `uuid`/`chrono` features of the sqlx facade for `FromRow` derivation. Use `sqlx::postgres::PgRow` + manual `FromRow` impl that reads columns as their native Postgres binary representations and converts to `Uuid`/`DateTime<Utc>` locally. Concretely: read UUIDs as `sqlx::types::Uuid` (which exists without the feature) or as `[u8; 16]` and construct `uuid::Uuid::from_bytes(...)`; read timestamps as `sqlx::types::chrono::DateTime` if available (confirm at compile time) or as `i64` microseconds-since-epoch.
+
+  **Recommended approach:** implement `FromRow` by hand (don't use the derive macro), using `row.try_get::<T, _>(col)` for each column with explicit Postgres-native types, then convert at the site of reading.
+
+- **Task 1.5 (migration runner)** — the plan's `sqlx::migrate!()` macro is unavailable. Replace with a simple hand-rolled runner: read `.sql` files from the `migrations/` directory at startup, compute an index, compare against rows in a `_schema_migrations(version, applied_at)` table, apply anything new in order inside a transaction. ~30 lines.
+- **No change** to the schema SQL itself or the public API shape.
+- Commits made before this amendment: `3ae13283`, `8ed62e81`, `817d6640`, `c2ef48b1`, `aa75a275`.
+
+---
+
 ## Prerequisites
 
 Before starting, the implementing engineer should:
