@@ -9,10 +9,12 @@
 #![warn(clippy::pedantic)]
 
 pub mod migrate;
+pub mod push_sender;
 pub mod record;
 pub mod retry;
 pub mod store;
 pub mod worker;
+pub use push_sender::OutboxBackedPushSender;
 pub use record::OutboxRecord;
 pub use retry::RetryPolicy;
 pub use store::OutboxStore;
