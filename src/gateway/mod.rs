@@ -7,6 +7,8 @@
 //! - Request timeouts (30s) to prevent slow-loris attacks
 //! - Header sanitization (handled by axum/hyper)
 
+#[cfg(feature = "a2a")]
+pub mod a2a;
 pub mod acp_server;
 pub mod api;
 mod openai_compat;
@@ -829,6 +831,22 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .layer(RequestBodyLimitLayer::new(
             openai_compat::CHAT_COMPLETIONS_MAX_BODY_SIZE,
         ));
+
+    // A2A wake/resume layer runs on its own listener (see a2a::setup docs for
+    // why — state-type incompatibility with Router<AppState>). Setup may
+    // short-circuit if ZEROCLAW_A2A_DB_URL is unset, so the same binary runs
+    // in non-A2A pods unchanged.
+    //
+    // We spawn setup() as its own task rather than awaiting it inline, so the
+    // surrounding run_gateway future doesn't get infected with sqlx's
+    // Executor HRTB lifetimes (which break `spawn_component_supervisor`'s
+    // Send + 'static bound on the gateway future).
+    #[cfg(feature = "a2a")]
+    tokio::spawn(async {
+        if let Err(e) = a2a::setup().await {
+            tracing::error!("A2A setup failed: {e:#}");
+        }
+    });
 
     // Build router with middleware
     let app = Router::new()

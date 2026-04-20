@@ -10293,6 +10293,7 @@ dependencies = [
  "prost 0.14.3",
  "qrcode",
  "quick-xml",
+ "ra2a",
  "rand 0.10.1",
  "regex",
  "reqwest 0.12.28",
@@ -10310,6 +10311,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "shellexpand",
+ "sqlx",
  "strip-ansi-escapes",
  "tempfile",
  "thiserror 2.0.18",
@@ -10339,6 +10341,8 @@ dependencies = [
  "webpki-roots 1.0.7",
  "which",
  "wiremock",
+ "zeroclaw-a2a-outbox",
+ "zeroclaw-core",
  "zip",
 ]
 

@@ -3,7 +3,15 @@
 //! The sqlx `migrate` feature is disabled in the workspace (see plan
 //! amendments: it would activate `sqlx-sqlite` and collide with rusqlite).
 //! We apply compile-time-embedded SQL in version order, tracked via a
-//! `_schema_migrations` table. Each migration runs in its own transaction.
+//! `_schema_migrations` table.
+//!
+//! Migrations run without a wrapping transaction on purpose — holding a
+//! `&mut Transaction` across await points trips sqlx 0.8's `Executor<'_>`
+//! HRTB bound, which then propagates into the gateway's spawned-future Send
+//! requirement. Each migration's DDL is idempotent (`CREATE TABLE IF NOT
+//! EXISTS`, `CREATE EXTENSION IF NOT EXISTS`, etc.), so a crash between the
+//! DDL and the `_schema_migrations` insert is recoverable on next startup:
+//! the DDL becomes a no-op and the insert completes.
 
 use sqlx::PgPool;
 
@@ -44,13 +52,11 @@ pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {
             continue;
         }
 
-        let mut tx = pool.begin().await?;
-        sqlx::raw_sql(sql).execute(&mut *tx).await?;
+        sqlx::raw_sql(sql).execute(pool).await?;
         sqlx::query("INSERT INTO _schema_migrations (version) VALUES ($1)")
             .bind(version)
-            .execute(&mut *tx)
+            .execute(pool)
             .await?;
-        tx.commit().await?;
     }
     Ok(())
 }

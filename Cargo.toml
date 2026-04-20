@@ -28,6 +28,12 @@ categories = ["command-line-utilities", "api-bindings"]
 rust-version = "1.87"
 
 [dependencies]
+# A2A wake/resume (optional; gated on the `a2a` feature)
+zeroclaw-core = { path = "crates/zeroclaw-core", optional = true }
+zeroclaw-a2a-outbox = { path = "crates/zeroclaw-a2a-outbox", optional = true }
+ra2a = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+
 # CLI - minimal and fast
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
@@ -257,6 +263,8 @@ whatsapp-web = ["dep:wa-rs", "dep:wa-rs-core", "dep:wa-rs-binary", "dep:wa-rs-pr
 # Keep disabled by default to preserve current runtime behavior.
 firecrawl = []
 web-fetch-html2md = ["dep:html2md"]
+# A2A v1.0 wake/resume layer (Sam ↔ Walter push-notification delivery).
+a2a = ["dep:zeroclaw-core", "dep:zeroclaw-a2a-outbox", "dep:ra2a", "dep:sqlx"]
 
 [profile.release]
 opt-level = "z"      # Optimize for size
