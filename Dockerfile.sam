@@ -14,12 +14,18 @@ COPY Cargo.toml Cargo.lock build.rs ./
 COPY crates/robot-kit/Cargo.toml crates/robot-kit/Cargo.toml
 COPY crates/zeroclaw-types/Cargo.toml crates/zeroclaw-types/Cargo.toml
 COPY crates/zeroclaw-core/Cargo.toml crates/zeroclaw-core/Cargo.toml
-RUN mkdir -p src benches crates/robot-kit/src crates/zeroclaw-types/src crates/zeroclaw-core/src \
+COPY crates/zeroclaw-a2a-outbox/Cargo.toml crates/zeroclaw-a2a-outbox/Cargo.toml
+RUN mkdir -p src benches \
+      crates/robot-kit/src \
+      crates/zeroclaw-types/src \
+      crates/zeroclaw-core/src \
+      crates/zeroclaw-a2a-outbox/src \
     && echo "fn main() {}" > src/main.rs \
     && echo "fn main() {}" > benches/agent_benchmarks.rs \
     && echo "pub fn placeholder() {}" > crates/robot-kit/src/lib.rs \
     && echo "pub fn placeholder() {}" > crates/zeroclaw-types/src/lib.rs \
-    && echo "pub fn placeholder() {}" > crates/zeroclaw-core/src/lib.rs
+    && echo "pub fn placeholder() {}" > crates/zeroclaw-core/src/lib.rs \
+    && echo "pub fn placeholder() {}" > crates/zeroclaw-a2a-outbox/src/lib.rs
 RUN --mount=type=cache,id=zeroclaw-sam-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=zeroclaw-sam-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=zeroclaw-sam-target,target=/app/target,sharing=locked \
@@ -28,7 +34,11 @@ RUN --mount=type=cache,id=zeroclaw-sam-registry,target=/usr/local/cargo/registry
     else \
       cargo build --release --locked; \
     fi
-RUN rm -rf src benches crates/robot-kit/src crates/zeroclaw-types/src crates/zeroclaw-core/src
+RUN rm -rf src benches \
+      crates/robot-kit/src \
+      crates/zeroclaw-types/src \
+      crates/zeroclaw-core/src \
+      crates/zeroclaw-a2a-outbox/src
 
 # Real source build
 COPY src/ src/
@@ -41,6 +51,12 @@ RUN mkdir -p web/dist && \
     if [ ! -f web/dist/index.html ]; then \
       printf '<!doctype html><html><body><h1>Dashboard Unavailable</h1></body></html>' > web/dist/index.html; \
     fi
+# Force cargo to re-fingerprint the workspace: COPY preserves source mtimes
+# which can predate the target/ cache baked during the stub-prime step. That
+# confuses cargo's incremental check and it serves stale .rlib artifacts
+# (e.g. a stub zeroclaw-core.rlib without `pub mod a2a`). Bumping every .rs
+# and Cargo.toml mtime is the cheap, correct fix.
+RUN find src benches crates -type f \( -name '*.rs' -o -name '*.toml' \) -exec touch {} +
 RUN --mount=type=cache,id=zeroclaw-sam-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=zeroclaw-sam-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=zeroclaw-sam-target,target=/app/target,sharing=locked \
