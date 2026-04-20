@@ -167,6 +167,23 @@ spec:
                   name: zeroclaw-k8s-agent-secrets
                   key: gateway-paired-tokens
                   optional: true
+            # ── A2A wake/resume layer (feature=a2a) ──
+            - name: ZEROCLAW_A2A_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: zeroclaw-a2a-sam
+                  key: a2a_db_url
+                  optional: true
+            - name: ZEROCLAW_A2A_SCHEMA
+              value: "sam"
+            - name: ZEROCLAW_A2A_AGENT_ROLE
+              value: "sam"
+            - name: ZEROCLAW_A2A_BIND_ADDR
+              value: "0.0.0.0:3001"
+            - name: ZEROCLAW_A2A_PUBLIC_BASE_URL
+              value: "http://zeroclaw.ai-agents.svc.cluster.local:3001"
+            - name: ZEROCLAW_USE_A2A_DELEGATION
+              value: "false"   # toggled in Phase 2
           securityContext:
             runAsUser: 0
             runAsGroup: 0

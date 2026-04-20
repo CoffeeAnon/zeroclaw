@@ -307,6 +307,23 @@ spec:
               value: "http://vikunja.todolist.svc.cluster.local:3456"
             - name: VIKUNJA_TEAM_PROJECT_ID
               value: "7"
+            # ── A2A wake/resume layer (feature=a2a) ──
+            - name: ZEROCLAW_A2A_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: zeroclaw-a2a-walter
+                  key: a2a_db_url
+                  optional: true
+            - name: ZEROCLAW_A2A_SCHEMA
+              value: "walter"
+            - name: ZEROCLAW_A2A_AGENT_ROLE
+              value: "walter"
+            - name: ZEROCLAW_A2A_BIND_ADDR
+              value: "0.0.0.0:3001"
+            - name: ZEROCLAW_A2A_PUBLIC_BASE_URL
+              value: "http://zeroclaw-k8s-agent.ai-agents.svc.cluster.local:3001"
+            - name: ZEROCLAW_A2A_TASK_TIMEOUT_SECS
+              value: "300"
           securityContext:
             runAsUser: 0
             runAsGroup: 0
