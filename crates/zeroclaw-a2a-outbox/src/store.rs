@@ -6,9 +6,12 @@
 //! raw bytes (the sqlx `uuid` feature is also disabled, so `Uuid` is neither
 //! `Encode<Postgres>` nor `Decode<Postgres>`).
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
+
+use crate::record::OutboxRecord;
 
 #[derive(Clone)]
 pub struct OutboxStore {
@@ -51,5 +54,68 @@ impl OutboxStore {
             index: "id".to_string(),
             source: e.into(),
         })
+    }
+
+    /// Atomically claim up to `limit` pending rows whose `next_attempt_at` is
+    /// in the past. Increments `attempts` and returns the claimed rows. Uses
+    /// `FOR UPDATE SKIP LOCKED` so multiple workers can run concurrently.
+    pub async fn claim_due(&self, limit: i64) -> Result<Vec<OutboxRecord>, sqlx::Error> {
+        sqlx::query_as::<_, OutboxRecord>(
+            r#"
+            WITH due AS (
+                SELECT id FROM outbox
+                WHERE status = 'pending' AND next_attempt_at <= NOW()
+                ORDER BY next_attempt_at
+                FOR UPDATE SKIP LOCKED
+                LIMIT $1
+            )
+            UPDATE outbox
+            SET attempts = attempts + 1
+            FROM due
+            WHERE outbox.id = due.id
+            RETURNING outbox.*
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn mark_delivered(&self, id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE outbox SET status = 'delivered', delivered_at = NOW() WHERE id = $1::uuid",
+        )
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_deadletter(&self, id: Uuid, reason: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE outbox SET status = 'deadletter', last_error = $2 WHERE id = $1::uuid",
+        )
+        .bind(id.to_string())
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn reschedule(
+        &self,
+        id: Uuid,
+        at: DateTime<Utc>,
+        reason: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE outbox SET next_attempt_at = $2::timestamptz, last_error = $3 WHERE id = $1::uuid",
+        )
+        .bind(id.to_string())
+        .bind(at.to_rfc3339())
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }

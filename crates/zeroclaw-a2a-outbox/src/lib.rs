@@ -12,6 +12,8 @@ pub mod migrate;
 pub mod record;
 pub mod retry;
 pub mod store;
+pub mod worker;
 pub use record::OutboxRecord;
 pub use retry::RetryPolicy;
 pub use store::OutboxStore;
+pub use worker::OutboxWorker;
