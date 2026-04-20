@@ -9,4 +9,6 @@
 #![warn(clippy::pedantic)]
 
 pub mod record;
+pub mod retry;
 pub use record::OutboxRecord;
+pub use retry::RetryPolicy;
