@@ -1,3 +1,6 @@
+#[cfg(feature = "a2a")]
+mod a2a_inbox;
+
 use crate::config::Config;
 use anyhow::{bail, Result};
 use chrono::Utc;
@@ -103,9 +106,26 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
         tracing::info!("Cron disabled; scheduler supervisor not started");
     }
 
+    #[cfg(feature = "a2a")]
+    {
+        let inbox_cfg = config.clone();
+        handles.push(spawn_component_supervisor(
+            "a2a-inbox-drain",
+            initial_backoff,
+            max_backoff,
+            move || {
+                let cfg = inbox_cfg.clone();
+                async move { a2a_inbox::run(cfg).await }
+            },
+        ));
+    }
+
     println!("🧠 ZeroClaw daemon started");
     println!("   Gateway:  http://{host}:{port}");
+    #[cfg(not(feature = "a2a"))]
     println!("   Components: gateway, channels, heartbeat, scheduler");
+    #[cfg(feature = "a2a")]
+    println!("   Components: gateway, channels, heartbeat, scheduler, a2a-inbox-drain");
     println!("   Ctrl+C to stop");
 
     tokio::signal::ctrl_c().await?;
