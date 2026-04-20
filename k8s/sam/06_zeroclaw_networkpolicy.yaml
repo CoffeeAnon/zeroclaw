@@ -35,6 +35,10 @@ spec:
     - ports:
         - protocol: TCP
           port: 3000
+    # A2A wake/resume listener (agent-card + JSON-RPC + webhook).
+    - ports:
+        - protocol: TCP
+          port: 3001
 
 ---
 apiVersion: networking.k8s.io/v1

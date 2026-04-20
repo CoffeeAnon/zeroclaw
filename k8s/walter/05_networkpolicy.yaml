@@ -28,6 +28,10 @@ spec:
       ports:
         - protocol: TCP
           port: 3000
+        # A2A wake/resume listener (agent-card + JSON-RPC, Walter only
+        # serves the JSON-RPC surface; no webhook on Walter).
+        - protocol: TCP
+          port: 3001
     # Kubelet health probes from node network
     - from:
         - ipBlock:
@@ -35,6 +39,8 @@ spec:
       ports:
         - protocol: TCP
           port: 3000
+        - protocol: TCP
+          port: 3001
   egress:
     # HBONE tunnel traffic (ambient mesh egress)
     - ports:

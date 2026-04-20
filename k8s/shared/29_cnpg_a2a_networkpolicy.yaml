@@ -14,15 +14,11 @@ spec:
         - ports:
             - port: "15008"
               protocol: TCP
-    # CNPG instance-manager HTTP probes (:8000). Allow from node host
-    # (kubelet probes originate there), other cluster nodes, and any
-    # cluster pod. Cilium's `fromEntities` handles identity-vs-IP mapping
-    # that plain K8s `ipBlock: 10.0.0.0/8` misses for intra-cluster pods.
-    - fromEntities:
-        - host
-        - remote-node
-        - cluster
-      toPorts:
+    # CNPG instance-manager HTTP probes (:8000). Left open (no from clause)
+    # so kubelet probes + operator traffic + peer-pod checks all succeed
+    # regardless of cilium identity resolution. The port only serves health
+    # endpoints (/startupz, /readyz, /metrics) so the surface is tiny.
+    - toPorts:
         - ports:
             - port: "8000"
               protocol: TCP

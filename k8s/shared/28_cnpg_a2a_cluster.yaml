@@ -13,19 +13,33 @@ spec:
     initdb:
       database: a2a
       owner: a2a_owner
-      # pgcrypto must be enabled as superuser (postgres) here; per-agent
-      # roles sam_rw / walter_rw don't get CREATE EXTENSION rights later.
-      # Without pgcrypto the migration's gen_random_uuid() default fails.
+      # Cluster-wide bootstrap (runs against the `postgres` admin DB):
+      # roles are global, so create them here. pgcrypto was historically
+      # enabled here too — it's unused now that gen_random_uuid() is in
+      # PG 16 core, but kept for forward compat with older PG.
       postInitSQL:
+        - "CREATE ROLE sam_rw LOGIN"
+        - "CREATE ROLE walter_rw LOGIN"
+      # Application-DB bootstrap (runs against `a2a`): schemas and grants
+      # live here because they're per-database objects. Putting them in
+      # `postInitSQL` above would create them in the `postgres` admin DB
+      # where they're invisible to the app.
+      postInitApplicationSQL:
         - "CREATE EXTENSION IF NOT EXISTS pgcrypto"
         - "CREATE SCHEMA IF NOT EXISTS sam"
         - "CREATE SCHEMA IF NOT EXISTS walter"
-        - "CREATE ROLE sam_rw LOGIN"
-        - "CREATE ROLE walter_rw LOGIN"
         - "GRANT USAGE, CREATE ON SCHEMA sam TO sam_rw"
         - "GRANT USAGE, CREATE ON SCHEMA walter TO walter_rw"
         - "ALTER DEFAULT PRIVILEGES IN SCHEMA sam GRANT ALL ON TABLES TO sam_rw"
         - "ALTER DEFAULT PRIVILEGES IN SCHEMA walter GRANT ALL ON TABLES TO walter_rw"
+        # The hand-rolled migration runner creates an unqualified
+        # _schema_migrations table, so both roles need public-schema
+        # rights even after search_path pushes their own schema first.
+        - "GRANT USAGE, CREATE ON SCHEMA public TO sam_rw, walter_rw"
+        # Default search_path per role so the application doesn't need
+        # any DSN-side options= query param.
+        - "ALTER ROLE sam_rw    IN DATABASE a2a SET search_path = sam, public"
+        - "ALTER ROLE walter_rw IN DATABASE a2a SET search_path = walter, public"
   monitoring:
     enablePodMonitor: true
   resources:
