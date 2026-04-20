@@ -13,6 +13,7 @@ pub mod recovery;
 pub mod research;
 pub mod session;
 pub mod team_orchestration;
+pub mod turn_context;
 
 #[cfg(test)]
 mod tests;

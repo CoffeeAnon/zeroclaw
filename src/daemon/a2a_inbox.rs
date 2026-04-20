@@ -94,13 +94,36 @@ async fn dispatch_one(
     task_id: &str,
     payload: &serde_json::Value,
 ) {
+    // Resume the original delegation's session id so Sam's memory for
+    // this conversation is in scope during the reply turn. Fall back to
+    // a fresh per-row session if no correlation exists (inbound event
+    // didn't originate from our ask_walter tool).
+    let correlation = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT session_id FROM a2a_delegations WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None)
+    .flatten();
+
     let pretty = serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string());
-    let message = format!("[A2A inbound from task {task_id}]\n{pretty}");
-    let session_id = Some(format!("a2a_inbox_{row_id}"));
+    let prelude = if correlation.is_some() {
+        format!(
+            "[A2A reply to your earlier delegation — task {task_id}]\n\
+             Review your recent conversation for the original request. Walter's \
+             response payload follows:\n\n{pretty}\n\n\
+             Relay Walter's answer back to whoever asked, using whatever channel \
+             this conversation is on."
+        )
+    } else {
+        format!("[A2A inbound from task {task_id}]\n{pretty}")
+    };
+    let session_id = correlation.or_else(|| Some(format!("a2a_inbox_{row_id}")));
 
     let run_result = crate::agent::loop_::run(
         config.clone(),
-        Some(message),
+        Some(prelude),
         None, // provider_override
         None, // model_override
         config.default_temperature,

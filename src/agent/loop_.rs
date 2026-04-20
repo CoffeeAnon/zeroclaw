@@ -2861,6 +2861,40 @@ pub async fn run(
     session_id: Option<String>,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<String> {
+    // Populate per-turn task-local context so capability-bridging tools
+    // (e.g. the A2A delegation tool) can correlate their async callbacks
+    // with the session that initiated them.
+    let scope_session = session_id.clone();
+    crate::agent::turn_context::with_turn(
+        scope_session,
+        run_inner(
+            config,
+            message,
+            provider_override,
+            model_override,
+            temperature,
+            peripheral_overrides,
+            interactive,
+            hooks,
+            session_id,
+            cancellation_token,
+        ),
+    )
+    .await
+}
+
+async fn run_inner(
+    config: Config,
+    message: Option<String>,
+    provider_override: Option<String>,
+    model_override: Option<String>,
+    temperature: f64,
+    peripheral_overrides: Vec<String>,
+    interactive: bool,
+    hooks: Option<&crate::hooks::HookRunner>,
+    session_id: Option<String>,
+    cancellation_token: Option<CancellationToken>,
+) -> Result<String> {
     if let Err(error) = crate::plugins::runtime::initialize_from_config(&config.plugins) {
         tracing::warn!("plugin registry initialization skipped: {error}");
     }

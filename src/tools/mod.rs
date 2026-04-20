@@ -15,6 +15,8 @@
 //! To add a new tool, implement [`Tool`] in a new submodule and register it in
 //! [`all_tools_with_runtime`]. See `AGENTS.md` §7.3 for the full change playbook.
 
+#[cfg(feature = "a2a")]
+pub mod a2a_delegate;
 pub mod agent_load_tracker;
 pub mod agent_selection;
 pub mod agents_ipc;
@@ -694,6 +696,18 @@ pub fn all_tools_with_runtime(
                 description: tool.description.clone(),
                 parameters: tool.parameters.clone(),
             })));
+        }
+    }
+
+    // A2A delegation tool — gated on BOTH the `a2a` Cargo feature AND
+    // the runtime `ZEROCLAW_USE_A2A_DELEGATION=true` env flag so the LLM
+    // only sees it when the cluster is fully wired for A2A delivery.
+    #[cfg(feature = "a2a")]
+    {
+        let use_a2a = std::env::var("ZEROCLAW_USE_A2A_DELEGATION").as_deref() == Ok("true");
+        if use_a2a {
+            tool_arcs.push(Arc::new(a2a_delegate::A2ADelegateTool::new()));
+            tracing::info!("ask_walter (A2A delegation) tool registered");
         }
     }
 
