@@ -7,3 +7,6 @@
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
+
+pub mod record;
+pub use record::OutboxRecord;
