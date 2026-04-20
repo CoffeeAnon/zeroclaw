@@ -1,0 +1,36 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: zeroclaw-a2a
+  namespace: ai-agents
+spec:
+  instances: 2
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+  storage:
+    size: 5Gi
+    storageClass: rook-ceph-block
+  bootstrap:
+    initdb:
+      database: a2a
+      owner: a2a_owner
+      # pgcrypto must be enabled as superuser (postgres) here; per-agent
+      # roles sam_rw / walter_rw don't get CREATE EXTENSION rights later.
+      # Without pgcrypto the migration's gen_random_uuid() default fails.
+      postInitSQL:
+        - "CREATE EXTENSION IF NOT EXISTS pgcrypto"
+        - "CREATE SCHEMA IF NOT EXISTS sam"
+        - "CREATE SCHEMA IF NOT EXISTS walter"
+        - "CREATE ROLE sam_rw LOGIN"
+        - "CREATE ROLE walter_rw LOGIN"
+        - "GRANT USAGE, CREATE ON SCHEMA sam TO sam_rw"
+        - "GRANT USAGE, CREATE ON SCHEMA walter TO walter_rw"
+        - "ALTER DEFAULT PRIVILEGES IN SCHEMA sam GRANT ALL ON TABLES TO sam_rw"
+        - "ALTER DEFAULT PRIVILEGES IN SCHEMA walter GRANT ALL ON TABLES TO walter_rw"
+  monitoring:
+    enablePodMonitor: true
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      memory: "512Mi"
