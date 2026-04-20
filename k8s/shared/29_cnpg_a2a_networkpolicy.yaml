@@ -1,0 +1,78 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-cnpg-a2a
+  namespace: ai-agents
+spec:
+  endpointSelector:
+    matchLabels:
+      cnpg.io/cluster: zeroclaw-a2a
+  ingress:
+    # Istio mTLS passthrough (ambient ztunnel pattern used by other
+    # ai-agents workloads).
+    - toPorts:
+        - ports:
+            - port: "15008"
+              protocol: TCP
+    # CNPG instance-manager HTTP probes (:8000). Allow from node host
+    # (kubelet probes originate there), other cluster nodes, and any
+    # cluster pod. Cilium's `fromEntities` handles identity-vs-IP mapping
+    # that plain K8s `ipBlock: 10.0.0.0/8` misses for intra-cluster pods.
+    - fromEntities:
+        - host
+        - remote-node
+        - cluster
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+    # Postgres :5432 from Sam, Walter, and any peer CNPG pod (replication).
+    - fromEndpoints:
+        - matchLabels:
+            app: zeroclaw
+        - matchLabels:
+            app: zeroclaw-k8s-agent
+        - matchLabels:
+            cnpg.io/cluster: zeroclaw-a2a
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+  egress:
+    # DNS resolution.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # Replication to peer CNPG pods.
+    - toEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: zeroclaw-a2a
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # CNPG operator in cnpg-system namespace (status reports, webhook).
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: cnpg-system
+      toPorts:
+        - ports:
+            - port: "9443"
+              protocol: TCP
+            - port: "8080"
+              protocol: TCP
+    # Kubernetes API server (node IPs / control-plane).
+    - toEntities:
+        - kube-apiserver
+    # Istio mTLS egress.
+    - toPorts:
+        - ports:
+            - port: "15008"
+              protocol: TCP
