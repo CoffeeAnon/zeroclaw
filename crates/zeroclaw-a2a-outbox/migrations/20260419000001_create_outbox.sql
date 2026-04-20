@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE TABLE IF NOT EXISTS outbox (
     id              UUID PRIMARY KEY,
     task_id         TEXT NOT NULL,

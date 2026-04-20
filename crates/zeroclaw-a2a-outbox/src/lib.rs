@@ -8,7 +8,10 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod migrate;
 pub mod record;
 pub mod retry;
+pub mod store;
 pub use record::OutboxRecord;
 pub use retry::RetryPolicy;
+pub use store::OutboxStore;
