@@ -43,6 +43,158 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 
 ---
 
+**2026-04-19 — extended amendments (Tasks 1.4–2.5)** (applied after 1.6 completion, commits `dacc26de`, `bcaa2f24`, `8dbf8fba`):
+
+### A. sqlx macro constraint extends to Tasks 1.7 and 2.3
+
+The previous amendment listed 1.3, 1.5, 1.6, 1.11. Add:
+
+- **Task 1.7** — the test's `sqlx::query!("SELECT … FROM outbox LIMIT 1")` must become a runtime `sqlx::query(sql).fetch_one(&pool).await?` with `row.try_get("col")`.
+- **Task 2.3** — `handle_inbox_wake`'s two `sqlx::query!` calls must become runtime. The `UPDATE inbox_events WHERE id = $1` binds a `uuid::Uuid`; use `.bind(row.id.to_string())` with `WHERE id = $1::uuid` per the pattern established in Task 1.6's store.
+
+### B. UUID / DateTime bind convention (established in Task 1.6)
+
+Binding `Uuid` or `DateTime<Utc>` directly is impossible under the minimal sqlx feature set (neither implements `Encode<Postgres>`). The convention going forward:
+
+- Server-generate UUIDs via `gen_random_uuid()` in the INSERT when possible.
+- When a UUID must be bound from Rust, use `.bind(id.to_string())` with `WHERE col = $1::uuid` (explicit SQL cast).
+- For `DateTime<Utc>`, use `.bind(dt.to_rfc3339())` with `$N::timestamptz`.
+- Reading is via `try_get_unchecked::<Vec<u8>, _>` + `Uuid::from_slice`, or for timestamps the `pg_micros_to_datetime` helper from `record.rs`.
+
+### C. testcontainers is the standard integration-test harness
+
+All plan-provided tests that reference `DATABASE_URL=postgres://postgres@localhost/a2a_test` should instead spin up a per-run ephemeral Postgres via `testcontainers-modules`. Pattern is established in `tests/store_integration.rs` and `tests/worker_integration.rs`: a `Ctx` struct holding the pool plus the container handle (the container must outlive the pool), `setup()` returns the Ctx, migrations are applied via `migrate::apply()`. No local Postgres or `DATABASE_URL` required beyond a running docker daemon.
+
+Dev-deps required: `testcontainers = "0.23"`, `testcontainers-modules = { version = "0.11", features = ["postgres"] }`.
+
+### D. `RetryPolicy::max_attempts` semantics (Task 1.6 clarification)
+
+`max_attempts` is the **total** attempt cap, not the number of retries after the first attempt. The worker calls `policy.delay_for(attempts_used)` where `attempts_used` is the 1-indexed count already attempted (including the failure just observed). `delay_for` returns `None` when `attempts_used >= max_attempts`, triggering dead-letter. Under this convention, `delay_for(0)` is unreachable — the first attempt has no pre-delay. The retry-unit-tests in `retry.rs` still pass; only the worker's call-site interpretation changed from the plan's `attempts - 1`.
+
+### E. pgcrypto + schema strategy for CNPG (Task 1.13)
+
+The outbox migration uses `gen_random_uuid()` which requires the `pgcrypto` extension. Extension creation needs superuser, so it cannot live in the application migration (which runs as `sam_rw` / `walter_rw`). Move `CREATE EXTENSION IF NOT EXISTS pgcrypto` out of the migration and into the CNPG cluster's `postInitSQL` (Task 1.13). The migration already carries the clause defensively for local testcontainers runs where the user is `postgres` superuser — acceptable to keep for local hermeticity; CNPG will noop on "already exists" in production.
+
+Additionally, the CNPG cluster creates separate `sam` and `walter` schemas. The existing `migrate.rs` uses unqualified table names (`outbox`, `_schema_migrations`) and relies on the connection's `search_path` to route those to the correct schema. In Task 1.12, the pool construction must either:
+
+1. Append `?options=-csearch_path%3Dsam` (or walter) to the DSN, or
+2. Run `SET search_path TO sam` on each connection via `PgPoolOptions::after_connect`.
+
+Option 2 is more robust and testable. Document the choice in Task 1.12.
+
+### F. Missing `push_notification_configs` migration (Task 1.11 gap)
+
+Task 1.11's test inserts into `push_notification_configs` and the handler selects from it, but no migration defines this table. Add a migration — either as a separate file in the core crate or appended to the outbox crate's schema. Recommended shape:
+
+```sql
+CREATE TABLE IF NOT EXISTS push_notification_configs (
+    task_id    TEXT NOT NULL,
+    config_id  TEXT NOT NULL DEFAULT '',
+    url        TEXT NOT NULL,
+    token      TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (task_id, config_id)
+);
+```
+
+If Task 1.12 ends up using ra2a's own Postgres store (see section H below), the schema and table name must match ra2a's convention (which uses `a2a_tasks`). In that case, define our own `push_notification_configs` separately — ra2a's push config store code is not publicly exported (section H).
+
+### G. Migration home consolidation
+
+Task 1.11 puts migrations under a brand-new `crates/zeroclaw-core/migrations/` directory. This creates duplication: two migration runners (one per crate) and two `_schema_migrations` tables.
+
+Consolidate: keep all A2A migrations in `crates/zeroclaw-a2a-outbox/migrations/` (rename the crate later if it grows beyond outbox-only). `zeroclaw-core` can depend on `zeroclaw-a2a-outbox` and call `migrate::apply()` at startup via the main binary (Task 1.12 step 4). Add the `inbox_events` and `push_notification_configs` tables as additional migration files in the outbox crate alongside `20260419000001_create_outbox.sql`.
+
+### H. ra2a 0.10.1 API surface — verified API deviations from plan
+
+Verified against `ra2a 0.10.1` source at `~/.cargo/registry/src/.../ra2a-0.10.1/`. The plan's pseudocode diverges from the real API in several ways:
+
+1. **Push-sender trait is `PushSender`, not `PushNotificationSender`.** Method is `send_push(config: &PushNotificationConfig, task: &Task)` returning `Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>`. Payload is a `Task` (full snapshot), NOT a `StreamResponse`. Task 1.7 rewrite:
+
+   ```rust
+   use ra2a::server::PushSender;
+   use ra2a::types::{PushNotificationConfig, Task};
+
+   impl PushSender for OutboxBackedPushSender {
+       fn send_push<'a>(
+           &'a self,
+           config: &'a PushNotificationConfig,
+           task: &'a Task,
+       ) -> Pin<Box<dyn Future<Output = ra2a::Result<()>> + Send + 'a>> {
+           Box::pin(async move {
+               let payload = serde_json::to_value(task)
+                   .map_err(|e| ra2a::A2AError::Other(e.to_string()))?;
+               self.store
+                   .enqueue(task.id.as_ref(), 0, &config.url,
+                            config.token.as_deref(), payload)
+                   .await
+                   .map_err(|e| ra2a::A2AError::Database(e.to_string()))?;
+               Ok(())
+           })
+       }
+   }
+   ```
+
+   Note: because payload is always a `Task`, the plan's `extract_ids` function disappears — `sequence` is always `0` for MVP (idempotency on `task_id` alone for terminal-state updates). If multiple Task snapshots arrive for the same task during streaming, later ones will be deduped by the `UNIQUE (task_id, sequence)` constraint via `ON CONFLICT DO UPDATE SET task_id = outbox.task_id`. If fresh snapshots need to re-enqueue (e.g., final state different from prior snapshot), bump `sequence` monotonically — but that requires tracking state the plan doesn't currently capture. MVP: `sequence = 0`, send once on terminal state only.
+
+2. **Error type is `A2AError`, not `Error`.** Variants: `A2AError::InternalError(String)`, `A2AError::Database(String)`, `A2AError::Other(String)`. Plan's `ra2a::error::Error::Internal` → `ra2a::A2AError::InternalError` (or use `Other`/`Database` as appropriate).
+
+3. **StreamResponse variant names differ.** Plan uses `StreamResponse::TaskStatusUpdate` / `TaskArtifactUpdate`; actual names are `StreamResponse::StatusUpdate` / `ArtifactUpdate`. Also: `Event` is a re-exported type alias for `StreamResponse` inside `ra2a::server`, so `Event::Task(task)` is equivalent to `StreamResponse::Task(task)`.
+
+4. **`Task::new` signature** takes `impl Into<TaskId>` and `impl Into<ContextId>`. Both IDs are newtype wrappers around `String` with `From<&str>`, `From<&String>`, `From<String>`. `Task::new(&ctx.task_id, &ctx.context_id)` works unchanged (plan got this right).
+
+5. **`AgentCard::new(name, description, interfaces)` is minimal-fields only.** It sets sane defaults for `version`, `default_input_modes` (`text/plain`), `default_output_modes`, `skills: vec![]`, etc. To publish actual skills, mutate `card.skills` post-construction.
+
+6. **`TransportProtocol::new(TransportProtocol::JSONRPC)`** — `JSONRPC` is a `&'static str` const, and `TransportProtocol::new` takes `impl Into<String>`. Plan's code compiles, though `TransportProtocol::from(TransportProtocol::JSONRPC)` is slightly cleaner. No change required.
+
+7. **`PushNotificationConfig` fields** are `{ id: Option<String>, url: String, token: Option<String>, authentication: Option<AuthenticationInfo> }`. Plan omitted `id`. Use `PushNotificationConfig::new(url)` builder then set fields.
+
+8. **`PostgresTaskStore` EXISTS in ra2a behind `feature = "postgresql"`, but is NOT publicly re-exported.** The type lives at `ra2a::server::task_store::sql::postgres::PostgresTaskStore`, but the enclosing `sql` module is `pub(super)` — only accessible from within ra2a's own `server` module. **Task 1.12 cannot use it.** Options:
+
+   a. Use `InMemoryTaskStore` (ships via `ra2a::server::InMemoryTaskStore`). Acceptable for Phase 1 — task state is reconstructible from inbound A2A messages, and persistence is not yet load-bearing for MVP. Document the tradeoff: task history is lost on restart, but the outbox (durable) + inbox_events (durable) are the two pieces that matter for wake/resume correctness.
+
+   b. Implement our own `PostgresTaskStore` by hand. Substantial extra scope — the `TaskStore` trait has ~8 methods. Defer to a Phase 1.5 task.
+
+   **Recommendation:** use `InMemoryTaskStore` for Phase 1. Add Task 1.12.5 for an optional hand-rolled Postgres task store if operational experience demands it. Same decision applies to `PushNotificationConfigStore` — use `InMemoryPushNotificationConfigStore` (also publicly re-exported), persist task-keyed tokens in the standalone `push_notification_configs` table we control (section F) which Sam's webhook queries directly.
+
+9. **ra2a ships `HttpPushSender`** (publicly re-exported) — it POSTs the Task directly to the config URL. For MVP we override with our own `OutboxBackedPushSender` to get durability. Keep that design.
+
+### I. Updated ra2a import cheatsheet
+
+```rust
+// Types (via prelude at crate root)
+use ra2a::{
+    AgentCapabilities, AgentCard, AgentInterface, AgentSkill, Artifact, Message, Part,
+    PushNotificationConfig, Task, TaskState, TaskStatus, TaskStatusUpdateEvent,
+    TaskArtifactUpdateEvent, TransportProtocol, StreamResponse,
+    A2AError, Result,
+};
+
+// Server surface
+use ra2a::server::{
+    AgentExecutor, RequestContext, EventQueue, Event,              // Event = StreamResponse
+    HandlerBuilder, ServerState, RequestHandler, a2a_router,
+    PushSender, PushNotificationConfigStore,
+    InMemoryTaskStore, InMemoryPushNotificationConfigStore,
+    HttpPushSender, HttpPushSenderConfig,
+};
+```
+
+### J. Consequences summary
+
+| Task | What changes |
+|------|--------------|
+| 1.7  | Implement `PushSender::send_push(&Task)`, not `PushNotificationSender::send(&StreamResponse)`. Drop `extract_ids`; use `sequence = 0`. Rewrite test with testcontainers + runtime queries. |
+| 1.8  | No ra2a API changes required. Compile test that `sam_agent_card` / `walter_agent_card` build without errors against ra2a 0.10.1. |
+| 1.9 / 1.10 | Use `StreamResponse::StatusUpdate` (not `TaskStatusUpdate`) if emitting status events. Executor trait shape (manual `Pin<Box<...>>`) is correct. `A2AError::InternalError` / `A2AError::Other` for error construction. |
+| 1.11 | Add `push_notification_configs` migration (section F). Consolidate into `zeroclaw-a2a-outbox/migrations/` (section G). Use testcontainers + runtime queries. |
+| 1.12 | Use `InMemoryTaskStore` + `InMemoryPushNotificationConfigStore` (section H). Wire pool with `search_path` (section E). Sam's webhook queries our standalone `push_notification_configs` table, independent of ra2a's in-memory store. |
+| 1.13 | Add `CREATE EXTENSION IF NOT EXISTS pgcrypto` to `postInitSQL`. |
+| 2.1  | `StreamResponse::StatusUpdate` not `TaskStatusUpdate`. |
+| 2.3  | `handle_inbox_wake`: runtime queries, UUID bind pattern. |
+
+---
+
 ## Prerequisites
 
 Before starting, the implementing engineer should:
