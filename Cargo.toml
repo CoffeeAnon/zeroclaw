@@ -10,7 +10,7 @@ resolver = "2"
 
 [workspace.dependencies]
 ra2a = "0.10.1"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"] }
 tokio = { version = "1.42", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync"] }
 
 [package]
