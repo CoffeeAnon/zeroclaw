@@ -4,273 +4,163 @@ metadata:
   name: zeroclaw-k8s-agent-skills
   namespace: ai-agents
 data:
-  k8s-manifest-builder.md: |
+  cluster-health-monitor.md: |
     ---
-    name: k8s-manifest-builder
-    version: 2.0.0
-    description: Structured workflow for creating, deploying, and maintaining K8s manifests in the scrapyard cluster. Use for any deployment, service creation, infrastructure task, or PR review feedback in the todolist namespace.
+    name: cluster-health-monitor
+    version: 1.0.0
+    description: Structured workflow for read-only cluster health monitoring. Use for any health check, debugging task, or incident investigation. Walter observes and reports; he does not apply, patch, or delete.
     always: true
     ---
 
-    # K8s Manifest Builder
+    # Cluster Health Monitor
 
-    You receive tasks from Sam via ACP. Each task is a self-contained work order.
-    This workflow keeps you on track and ensures the reviewer (Dan) sees clean,
-    consistent PRs.
+    You receive tasks from Sam via ACP. Each task is an observation request —
+    "what's the status of X", "investigate why Y is failing", "audit Z".
+    Walter gathers evidence and reports findings. Any change needed goes up
+    to Sam.
 
-    ## Workflow: Receive → Check → Build → Classify → Apply → Verify → Commit → Report
+    ## Workflow: Receive → Scope → Observe → Analyze → Report
 
-    ### Step 1: RECEIVE — Parse the work order
+    ### Step 1: RECEIVE — Parse the request
 
     Extract from Sam's message:
-    - **Task**: What to create/modify/debug
-    - **Namespace**: Where (default: todolist)
-    - **Requirements**: Constraints (image, ports, resources, security)
-    - **Verification**: What Sam expects you to prove
+    - **Target**: What to observe (namespace, workload, controller, cluster-wide)
+    - **Signal**: What Sam is worried about (crash loop, slow rollout, cert issue)
+    - **Output**: What form of answer Sam wants (yes/no, full state, root cause)
 
     If anything is genuinely ambiguous, say so. Don't guess.
 
-    ### Step 2: CHECK — What exists already?
+    ### Step 2: SCOPE — Bound the observation
+
+    Narrow before broadening. Cluster-wide scans are expensive and noisy.
+
+    - Named resource? `kubectl describe <kind>/<name> -n <ns>`
+    - Single namespace? `kubectl get all -n <ns>` plus events
+    - Controller health? List its CRDs + pod status + recent events in its namespace
+    - Cluster-wide? `kubectl get nodes`, then
+      `kubectl get pods -A --field-selector=status.phase!=Running`
+
+    Avoid `kubectl get all -A` — the output dwarfs your shell budget.
+
+    ### Step 3: OBSERVE — Gather evidence
+
+    Pull facts, not interpretations.
 
     ```bash
-    kubectl get namespace <ns> 2>/dev/null
-    kubectl get all -n <ns>
-    list_memories
-    ls /data/workspace/scrapyard-applications/04_scrapyard_test_projects/
+    # Workload state
+    kubectl get deploy,sts,ds,pod -n <ns> -o wide
+
+    # Recent events (most useful signal for failures)
+    kubectl get events -n <ns> --sort-by='.lastTimestamp' | tail -30
+
+    # Current pod logs
+    kubectl logs <pod> -n <ns> --tail=100
+
+    # Previous crash logs (critical for CrashLoopBackOff)
+    kubectl logs <pod> -n <ns> --tail=100 --previous
+
+    # Resource consumption (if metrics-server is up)
+    kubectl top pods -n <ns>
+    kubectl top nodes
     ```
 
-    Don't duplicate resources. Don't overwrite existing work without reason.
-
-    ### Step 3: BUILD — Create manifests in the repo
-
-    **One directory per app.** All manifests for a single application — including
-    its database, cache, workers, secrets, and networking — go in ONE directory.
-    This matters because the reviewer sees the entire directory as a unit, and
-    applying manifests from scattered directories causes ordering problems and
-    duplicate resource conflicts (e.g., two namespace manifests with different
-    labels — whichever applies last silently wins).
-
-    ```
-    04_scrapyard_test_projects/NN_<app_name>/
-      00_namespace.yaml        (exactly once per namespace)
-      01_vso_vault.yaml        (all VaultStaticSecrets for this app)
-      02_pvc.yaml              (all PVCs)
-      03_deployment.yaml       (or 03_app.yaml + 03_db.yaml for multiple)
-      04_service.yaml
-      05_certificate.yaml      (external access — targets istio-system)
-      06_gateway.yaml          (external access — targets istio-system)
-      07_virtualservice.yaml   (external access)
-    ```
-
-    If you need multiple deployments (app + database), use descriptive filenames
-    in the same directory — not separate directories per component.
-
-    **Mandatory in every Deployment:**
-    - Pinned image tag (never `:latest`)
-    - Resource requests + memory limits
-    - `runAsNonRoot`, drop ALL capabilities, `seccompProfile: RuntimeDefault`
-    - `automountServiceAccountToken: false`
-    - Readiness probe (at minimum)
-
-    **Secrets:** Use VaultStaticSecret, not raw K8s Secrets. Raw Secrets with
-    hardcoded credentials should never appear in the repo — they bypass Vault's
-    audit trail and rotation.
-
-    **Namespace label:** `istio.io/dataplane-mode: ambient` (check existing namespace)
-
-    **Templates** for Certificate, Gateway, VirtualService, and VaultStaticSecret
-    are in your TOOLS.md under "Deployment Patterns." Follow them exactly.
-
-    ### Step 4: CLASSIFY — Can I apply this?
-
-    Classify by resource kind (not namespace):
-
-    **Direct-apply:** Deployments, Services, ConfigMaps, PVCs, ServiceAccounts,
-    Jobs, NetworkPolicies, VaultStaticSecrets, VaultAuth, CNPG resources — anything
-    in namespaces where you have RBAC.
-
-    **Must PR:** VirtualServices, Gateways, Certificates (regardless of namespace),
-    ClusterRoles, ClusterRoleBindings, anything outside your RBAC scope.
-
-    If unsure: `kubectl auth can-i create <resource> -n <ns>`
-
-    Complete direct-apply work first (Steps 5→6→7), then do the PR path. This
-    prevents accidentally committing direct-apply manifests to a feature branch.
-
-    ### Step 5: APPLY — Deploy to cluster
+    For controller CRDs (cert-manager, Istio, CNPG, etc.), check the CRs'
+    `.status` fields — that's where the controller records its own assessment.
 
     ```bash
-    kubectl apply -f <manifest.yaml>
+    kubectl get certificate -A \
+      -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,\
+    READY:.status.conditions[?(@.type=="Ready")].status
     ```
 
-    Apply in order: namespace → secrets → storage → database → app → service.
-    If forbidden, use the PR path instead.
+    ### Step 4: ANALYZE — Identify the signal
 
-    ### Step 5-PR: BRANCH + PR (for privileged manifests)
+    For each observation, answer:
 
-    ```bash
-    gitea-pr sync
-    cd /data/workspace/scrapyard-applications
-    git checkout -b walter/<app>-<purpose>
-    # Add manifests, commit, push
-    git add <files>
-    git commit -m "feat(<app>): add <resource> for <purpose>"
-    git push origin walter/<app>-<purpose>
-    gitea-pr create --title "feat(<app>): <description>" \
-      --head "walter/<app>-<purpose>" \
-      --body "## What ..."
-    git checkout main
-    ```
+    1. **Is this anomalous?** Compare against the cluster baseline in memory.
+       Normal-but-rare and broken-but-common are different.
+    2. **What's the proximate cause?** Pod OOMKilled → memory limit hit.
+       Certificate stuck → CA issuer unreachable. Service no endpoints →
+       selector mismatch or readiness probe failing.
+    3. **What's the root cause?** Don't stop at the proximate. If a pod
+       OOMs, why? A memory leak, a traffic spike, a misconfigured limit?
+    4. **What does Sam need to do?** Name the specific change — file,
+       field, value. "Bump `deployment/foo` limits.memory from 128Mi to
+       256Mi in `bar/foo.yaml`."
 
-    Include in the PR body: what manifests are included, why they need a PR,
-    and what commands to run after merge.
+    If the evidence doesn't support a root cause, say so. Speculation
+    wastes Sam's time.
 
-    ### Step 6: VERIFY — Prove it works
-
-    ```bash
-    kubectl get pods -n <ns> -o wide
-    kubectl get endpoints -n <ns>
-    kubectl get events -n <ns> --sort-by='.lastTimestamp' | tail -20
-    ```
-
-    If pods aren't Running within 60 seconds, debug with `describe` and `logs`.
-
-    ### Step 7: COMMIT — Save to repo
-
-    ```bash
-    cd /data/workspace/scrapyard-applications
-    git add 04_scrapyard_test_projects/<app_dir>/
-    git commit -m "feat(<app>): <what was created/changed>"
-    git push
-    ```
-
-    ### Step 8: REPORT — Tell Sam what happened
+    ### Step 5: REPORT — Situation, signal, recommendation
 
     ```
-    RESULT: [success/partial/failed]
+    SITUATION:
+    - Target: <what was observed>
+    - Scope: <namespace(s), resource(s)>
+    - Duration: <time window of evidence>
 
-    CREATED:
-    - [resource type] [name] in [namespace] — [status]
+    OBSERVATIONS:
+    - <finding 1 with specifics — names, counts, error messages>
+    - <finding 2>
 
-    VERIFIED:
-    - Pods: [names and statuses]
-    - Services: [names and endpoints]
+    ROOT CAUSE:
+    - <one sentence, if identifiable>
+    - <why the evidence points to this>
 
-    COMMITTED:
-    - [file paths added/modified]
-    - [commit hash]
+    RECOMMENDATION:
+    - <specific change Sam or Dan should make>
+    - <file/resource to modify, field, new value>
 
-    ISSUES:
-    - [Any problems, blockers, or things Sam should know]
-
-    PR SUBMITTED:  (if applicable)
-    - PR #<number>: <title> — <url>
-    - After merge: kubectl apply -f <paths>
-    - Blocked until merged: <what won't work>
+    BLOCKERS (if any):
+    - <something Walter could not check — missing RBAC, rotated logs>
     ```
 
-    ---
+    If everything is healthy, the whole report is one line:
+    "Audit clean on <target>. <key metric summary>."
 
-    ## Addressing PR Review Comments
+    ## Cluster-Wide Health Survey
 
-    When Sam or the cron monitor tells you to address review comments, follow
-    these phases. They're separate from Steps 1-8 above.
+    When Sam asks for overall cluster status, hit these categories in order:
 
-    ### Phase READ
+    1. **Nodes** — ready count, conditions (MemoryPressure, DiskPressure,
+       PIDPressure, NetworkUnavailable)
+    2. **Core workloads** — kube-system, Istio, Cilium, cert-manager pods;
+       anything not Running is an issue
+    3. **Persistent storage** — PV bound counts, Rook-Ceph HEALTH_* (via
+       its CephCluster CR `.status`)
+    4. **Certificates** — any Certificate in a non-Ready state for >10m
+    5. **Events cluster-wide** — Warnings in the last hour across namespaces
+    6. **Key app controllers** — CNPG clusters, KEDA scaledobjects,
+       Argo apps
 
-    ```bash
-    gitea-pr comments <pr-number>
-    ```
+    Report as a compact grid. Silence on categories that are all-healthy.
 
-    Extract what to change, what to fix, and any questions. If no comments
-    are returned, report back before proceeding — don't guess.
+    ## What Walter Never Does
 
-    ### Phase BRANCH
+    - `kubectl apply`, `kubectl create`, `kubectl patch`, `kubectl edit`,
+      `kubectl delete`, `kubectl scale`, `kubectl rollout restart` — all
+      forbidden.
+    - Modify any file in a cluster manifest repo. (Read is fine.)
+    - Restart, cordon, drain, or taint nodes.
+    - Create or edit Secrets, ConfigMaps, or any CRD instance.
+    - Run `kubectl exec` to mutate pod state.
 
-    ```bash
-    gitea-pr status <pr-number>       # find branch name
-    gitea-pr sync
-    git fetch origin
-    git checkout <branch>
-    git pull origin <branch>
-    ```
+    If Sam asks for any of the above, flag it — he may have sent the wrong
+    task to the wrong agent. Sam has his own limited write access; Dan can
+    do everything. Walter is the observer.
 
-    ### Phase FIX
+    ## Memory Strategy
 
-    Start by reviewing your full changeset — the reviewer sees all of it:
+    Save to Serena after significant observations:
 
-    ```bash
-    git diff main..HEAD --name-only
-    ```
+    - `cluster-baseline` — current node count, namespace count, key
+      controllers and their expected pod counts. Refresh monthly or after
+      major changes.
+    - `recurring-<symptom>` — patterns seen more than once (e.g.,
+      `recurring-vikunja-oom` with context on triggers and recommended fix).
+    - `task-log` — completed observations with date, target, and outcome.
 
-    Before touching any files, check for structural problems:
-    - **Stale files** from earlier iterations that you've since replaced
-    - **Scattered directories** for the same app (consolidate into one)
-    - **Duplicate resources** (e.g., two namespace manifests, two Certificates
-      for the same domain) — these cause silent conflicts when applied
-
-    Then make the requested changes. Edit files in place rather than recreating
-    them — this preserves git history and avoids introducing unrelated diffs.
-
-    Think about the principle behind each comment, not just the specific file.
-    If the reviewer says "use VaultStaticSecret instead of raw Secrets," that
-    applies to every secret in your PR, not just the one they pointed to.
-    Catching all instances now saves a review round-trip.
-
-    ### Phase PUSH
-
-    Self-review before committing:
-
-    ```bash
-    git diff main..HEAD --stat
-    ```
-
-    Check that no files contradict the reviewer's feedback and no duplicate
-    resources remain. Then commit, push, and return to main:
-
-    ```bash
-    git add <files>
-    git commit -m "fix(<app>): address review feedback on PR #<number>"
-    git push origin <branch>
-    git checkout main
-    ```
-
-    ### Phase REPLY
-
-    ```bash
-    gitea-pr reply <pr-number> --body "Changes pushed. Summary:
-    - <change 1>
-    - <change 2>
-    — Walter (K8s Agent)"
-    ```
-
-    ### Phase REPORT
-
-    ```
-    RESULT: review-addressed
-    PR: #<number>
-    CHANGES MADE:
-    - <what and why>
-    PUSHED: <commit> to <branch>
-    REMAINING:
-    - <anything you couldn't address>
-    ```
-
-    ---
-
-    ## Reference
-
-    **Mid-task messages from Sam** appear as `[Mid-turn message from user]`.
-    Read them immediately — Sam's corrections override the original work order.
-
-    **Fork hygiene:** Feature branches for PRs, main for direct-apply commits.
-    After a PR merges: `gitea-pr sync`, delete the local and remote branch.
-
-    **Recovery:** If you lose track, check `kubectl get all -n <ns>`, `ls <app_dir>/`,
-    and `list_memories`, then resume from the last verified step.
-
-    **Memory:** After completing a task, save to Serena: what was deployed,
-    decisions made, and any blockers discovered.
+    Memory prevents me from rediscovering the same baseline on every task.
   cron-management.md: |
     ---
     name: cron-management

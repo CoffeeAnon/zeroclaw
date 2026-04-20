@@ -25,9 +25,7 @@ spec:
         agent-role: k8s-infrastructure
         protocol: acp-http
     spec:
-      # TODO: rename SA from goose-todolist-configurator → walter-k8s-agent
-      # (requires coordinated cluster-side SA rename + RBAC rebind)
-      serviceAccountName: goose-todolist-configurator
+      serviceAccountName: walter-k8s-monitor
       automountServiceAccountToken: true
       securityContext:
         runAsUser: 1000
@@ -245,7 +243,7 @@ spec:
               mountPath: /data
       containers:
         - name: zeroclaw
-          image: gitea.coffee-anon.com/dan/zeroclaw-sam:v1.5.16
+          image: gitea.coffee-anon.com/dan/zeroclaw-sam:v1.5.17
           imagePullPolicy: Always
           command:
             - bash
@@ -340,7 +338,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
         - name: serena
-          image: gitea.coffee-anon.com/dan/zeroclaw-sam:v1.5.16
+          image: gitea.coffee-anon.com/dan/zeroclaw-sam:v1.5.17
           imagePullPolicy: IfNotPresent
           command:
             - sh

@@ -1,0 +1,162 @@
+# Walter — read-only cluster health monitor RBAC.
+# Replaces the orphaned goose-todolist-configurator ServiceAccount.
+#
+# Built-in `view` ClusterRole covers namespaced resources and omits secrets
+# by design. `walter-cluster-monitor` adds cluster-scoped reads and CRD
+# instance reads for controllers whose ClusterRoles don't aggregate into
+# `view`. CRD groups are enumerated explicitly so new operators are opt-in.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: walter-k8s-monitor
+  namespace: ai-agents
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: walter-cluster-monitor
+rules:
+  # Cluster-scoped core
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/status
+      - namespaces
+      - persistentvolumes
+      - componentstatuses
+    verbs: ["get", "list", "watch"]
+  # Events cluster-wide
+  - apiGroups: ["", "events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # Metrics (kubectl top)
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  # Storage / scheduling / API discovery
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csinodes", "csidrivers", "volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["snapshot.storage.k8s.io", "groupsnapshot.storage.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+      - validatingadmissionpolicies
+      - validatingadmissionpolicybindings
+    verbs: ["get", "list", "watch"]
+  # Istio
+  - apiGroups:
+      - install.istio.io
+      - networking.istio.io
+      - security.istio.io
+      - telemetry.istio.io
+      - extensions.istio.io
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Cilium
+  - apiGroups: ["cilium.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Postgres operators (CNPG primary, Zalando legacy)
+  - apiGroups: ["postgresql.cnpg.io", "barmancloud.cnpg.io", "acid.zalan.do"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Vault Secrets Operator
+  - apiGroups: ["secrets.hashicorp.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Sandbox CRD (agents.x-k8s.io) — how Walter himself is deployed
+  - apiGroups: ["agents.x-k8s.io", "extensions.agents.x-k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Argo (CD / Workflows / Events / Rollouts)
+  - apiGroups: ["argoproj.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Prometheus Operator
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # cert-manager
+  - apiGroups: ["cert-manager.io", "acme.cert-manager.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Rook-Ceph + CSI + bucket claims
+  - apiGroups: ["ceph.rook.io", "csi.ceph.io", "objectbucket.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # KEDA
+  - apiGroups: ["keda.sh", "eventing.keda.sh"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # VPA
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Node Feature Discovery
+  - apiGroups: ["nfd.k8s-sigs.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Trivy Operator (security scan results)
+  - apiGroups: ["aquasecurity.github.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # NVIDIA GPU Operator
+  - apiGroups: ["nvidia.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # MinIO (tenants + jobs + sts)
+  - apiGroups: ["minio.min.io", "job.min.io", "sts.min.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Strimzi Kafka
+  - apiGroups: ["core.strimzi.io", "kafka.strimzi.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  # Druid, Redis-Opstree, Pravega Zookeeper
+  - apiGroups:
+      - druid.apache.org
+      - redis.redis.opstreelabs.in
+      - zookeeper.pravega.io
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: walter-k8s-monitor-view
+subjects:
+  - kind: ServiceAccount
+    name: walter-k8s-monitor
+    namespace: ai-agents
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: walter-k8s-monitor-cluster
+subjects:
+  - kind: ServiceAccount
+    name: walter-k8s-monitor
+    namespace: ai-agents
+roleRef:
+  kind: ClusterRole
+  name: walter-cluster-monitor
+  apiGroup: rbac.authorization.k8s.io
