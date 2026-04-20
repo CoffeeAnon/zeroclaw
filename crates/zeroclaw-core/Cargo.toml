@@ -12,8 +12,10 @@ path = "src/lib.rs"
 zeroclaw-types = { path = "../zeroclaw-types" }
 zeroclaw-a2a-outbox = { path = "../zeroclaw-a2a-outbox" }
 ra2a = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 axum = "0.8"
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { workspace = true }
@@ -26,3 +28,4 @@ tower = { version = "0.5", features = ["util"] }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 http-body-util = "0.1"
+wiremock = "0.6"

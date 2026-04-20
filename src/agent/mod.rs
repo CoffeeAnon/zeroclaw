@@ -1,3 +1,5 @@
+#[cfg(feature = "a2a")]
+pub mod a2a_runner;
 #[allow(clippy::module_inception)]
 pub mod agent;
 pub mod classifier;

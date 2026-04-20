@@ -842,11 +842,14 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     // Executor HRTB lifetimes (which break `spawn_component_supervisor`'s
     // Send + 'static bound on the gateway future).
     #[cfg(feature = "a2a")]
-    tokio::spawn(async {
-        if let Err(e) = a2a::setup().await {
-            tracing::error!("A2A setup failed: {e:#}");
-        }
-    });
+    {
+        let a2a_config = Arc::new(config.clone());
+        tokio::spawn(async move {
+            if let Err(e) = a2a::setup(a2a_config).await {
+                tracing::error!("A2A setup failed: {e:#}");
+            }
+        });
+    }
 
     // Build router with middleware
     let app = Router::new()

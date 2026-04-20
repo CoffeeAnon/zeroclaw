@@ -43,18 +43,25 @@ use sqlx::PgPool;
 use zeroclaw_a2a_outbox::{migrate, OutboxBackedPushSender, OutboxWorker, RetryPolicy};
 use zeroclaw_core::a2a::{
     card::{sam_agent_card, walter_agent_card},
+    runner::AgentRunner,
     sam_executor::SamAgentExecutor,
     wake_channel,
     walter_executor::WalterAgentExecutor,
     webhook::{build_webhook_router, WebhookState},
 };
 
+use crate::agent::a2a_runner::AgentRunnerImpl;
+use crate::config::Config;
+
 /// Spawns the A2A listener + outbox worker in the background.
 ///
 /// Returns `Ok(())` even if `ZEROCLAW_A2A_DB_URL` is unset — an empty feature
 /// knob, treated as "A2A compiled in but not configured for this pod". This
 /// lets the same binary run in pods that don't participate in A2A.
-pub async fn setup() -> Result<()> {
+///
+/// `config` is used by Walter's executor to run the agent reasoning loop
+/// when an A2A message arrives; Sam's executor is a shim and ignores it.
+pub async fn setup(config: Arc<Config>) -> Result<()> {
     let Ok(db_url) = env::var("ZEROCLAW_A2A_DB_URL") else {
         tracing::info!("A2A feature compiled in but ZEROCLAW_A2A_DB_URL unset; skipping setup");
         return Ok(());
@@ -84,10 +91,16 @@ pub async fn setup() -> Result<()> {
 
     // HandlerBuilder::new takes `impl AgentExecutor + 'static` by value, so we
     // branch on role and construct with the concrete executor type each time.
+    // Walter's executor needs the agent runner; Sam's is a stateless shim.
     let a2a_router = match role.as_str() {
         "sam" => build_a2a_router(SamAgentExecutor, sam_agent_card(&base_url), push_sender.clone()),
         "walter" => {
-            build_a2a_router(WalterAgentExecutor, walter_agent_card(&base_url), push_sender.clone())
+            let runner: Arc<dyn AgentRunner> = Arc::new(AgentRunnerImpl::new(config.clone()));
+            build_a2a_router(
+                WalterAgentExecutor::new(runner),
+                walter_agent_card(&base_url),
+                push_sender.clone(),
+            )
         }
         other => {
             return Err(anyhow!(

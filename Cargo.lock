@@ -10369,9 +10369,11 @@ dependencies = [
 name = "zeroclaw-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "http-body-util",
  "ra2a",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sqlx",
@@ -10381,6 +10383,7 @@ dependencies = [
  "tower",
  "tracing",
  "uuid",
+ "wiremock",
  "zeroclaw-a2a-outbox",
  "zeroclaw-types",
 ]
