@@ -243,7 +243,7 @@ spec:
               mountPath: /data
       containers:
         - name: zeroclaw
-          image: gitea.coffee-anon.com/dan/zeroclaw-sam:v1.6.1
+          image: gitea.coffee-anon.com/dan/zeroclaw-sam:v1.6.2
           imagePullPolicy: Always
           command:
             - bash
@@ -355,7 +355,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
         - name: serena
-          image: gitea.coffee-anon.com/dan/zeroclaw-sam:v1.6.1
+          image: gitea.coffee-anon.com/dan/zeroclaw-sam:v1.6.2
           imagePullPolicy: IfNotPresent
           command:
             - sh
