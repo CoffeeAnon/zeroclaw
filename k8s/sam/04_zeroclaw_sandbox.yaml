@@ -182,8 +182,10 @@ spec:
               value: "0.0.0.0:3001"
             - name: ZEROCLAW_A2A_PUBLIC_BASE_URL
               value: "http://zeroclaw.ai-agents.svc.cluster.local:3001"
+            - name: ZEROCLAW_A2A_WEBHOOK_URL
+              value: "http://zeroclaw.ai-agents.svc.cluster.local:3001/webhook/a2a-notify"
             - name: ZEROCLAW_USE_A2A_DELEGATION
-              value: "false"   # toggled in Phase 2
+              value: "true"    # Phase 2 smoke test — registers the ask_walter tool
           securityContext:
             runAsUser: 0
             runAsGroup: 0
