@@ -1,0 +1,245 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zeroclaw-skill-speakr-lookup
+  namespace: ai-agents
+  labels:
+    app: zeroclaw
+    component: skill
+data:
+  speakr-lookup.md: |
+    ---
+    name: speakr-lookup
+    version: 1.0.0
+    description: >
+      On-demand lookup of past meeting transcripts from Speakr. Use when Dan
+      asks a question about a specific meeting (by title, participant, or
+      date) and the answer is not already in memory or today's meeting
+      digest. NOT for the daily summary cron — that has its own skill.
+    always: false
+    ---
+
+    # Speakr Lookup
+
+    Find and fetch meeting transcripts on demand via
+    `/data/.zeroclaw/workspace/skills/speakr-lookup/speakr-cli.py`.
+
+    ## When to use
+
+    Dan asks a question about a past meeting and you don't have the content —
+    e.g. "what did Tomas and I agree on in the data-pipelines 1:1",
+    "summarize last Friday's sprint wrap-up", "who owns the Jira release
+    date". Reach for this BEFORE replying "I don't have that meeting".
+
+    Do NOT use inside the daily-meeting-summary cron — step 1 of that skill
+    already aggregates the day's meetings.
+
+    ## Subcommands
+
+    All commands print results to stdout. Errors go to stderr and exit 1.
+
+    `search <query>` — search recordings. Passes `q=<query>` to Speakr, which
+    supports `date:today`, `date:YYYY-MM-DD`, `title:<text>`,
+    `participants:<name>`, or free text. Prints one row per hit:
+    `<id>  <date>  <title>  <participants>`. Max 50 results.
+
+      Examples:
+      - `speakr-cli.py search 'date:2026-04-20'`
+      - `speakr-cli.py search 'participants:Tomas'`
+      - `speakr-cli.py search 'title:data pipelines'`
+      - `speakr-cli.py search 'sprint wrap'`
+
+    `recent [--days N]` — recordings COMPLETED in the last N days (default 7).
+    Same output format as `search`.
+
+    `show <id>` — metadata only: title, date, participants, tags, summary.
+    No transcript body. Use this first to confirm you have the right meeting.
+
+    `get <id> [--out PATH]` — write the full transcript (speaker-tagged,
+    timestamped) to PATH. Default PATH is `/tmp/speakr-<id>.md`. Prints the
+    path, char count, and segment count. File is scratch — read it with
+    `file_read`, use it, and don't commit it to the wiki.
+
+    ## Typical flow
+
+    1. `speakr-cli.py search '<narrow query>'` → pick the right id.
+    2. `speakr-cli.py show <id>` → confirm it's the meeting Dan means.
+    3. `speakr-cli.py get <id>` → fetch full transcript to `/tmp/`.
+    4. `file_read /tmp/speakr-<id>.md` → read as needed.
+
+    If search returns zero hits, broaden the query (drop `title:` prefix,
+    try a participant, widen the date). If it returns many hits, add a
+    date or participant filter.
+
+    ## Auth
+
+    Uses `SPEAKR_API_TOKEN` from the pod env. If that env var is missing
+    the script exits 1 with `SPEAKR_API_TOKEN not set`.
+  speakr-cli.py: |
+    #!/usr/bin/env python3
+    """On-demand Speakr meeting lookup CLI for Sam.
+
+    Subcommands:
+      search <query>          search recordings (see Speakr q= syntax)
+      recent [--days N]       recordings COMPLETED in the last N days (default 7)
+      show <id>               print metadata only (no transcript body)
+      get <id> [--out PATH]   write full transcript to PATH (default /tmp/speakr-<id>.md)
+    """
+    from __future__ import annotations
+
+    import argparse
+    import datetime as dt
+    import json
+    import os
+    import sys
+    import urllib.parse
+    import urllib.request
+
+    BASE = os.environ.get('SPEAKR_BASE_URL', 'https://meetings.coffee-anon.com')
+
+
+    def _token() -> str:
+        tok = os.environ.get('SPEAKR_API_TOKEN')
+        if not tok:
+            print('SPEAKR_API_TOKEN not set', file=sys.stderr)
+            raise SystemExit(1)
+        return tok
+
+
+    def _api(path: str) -> dict:
+        req = urllib.request.Request(
+            f'{BASE}{path}',
+            headers={'Authorization': f'Bearer {_token()}'},
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+
+
+    def _fmt_row(rec: dict) -> str:
+        rid = rec.get('id', '?')
+        date = (rec.get('meeting_date') or '')[:10] or '????-??-??'
+        title = (rec.get('title') or 'Untitled').strip()
+        if len(title) > 50:
+            title = title[:47] + '...'
+        parts = rec.get('participants') or ''
+        if len(parts) > 60:
+            parts = parts[:57] + '...'
+        return f'{rid:>5}  {date}  {title:<50}  {parts}'
+
+
+    def _print_rows(recs: list[dict]) -> None:
+        if not recs:
+            print('(no matches)')
+            return
+        print(f'{"ID":>5}  {"DATE":<10}  {"TITLE":<50}  PARTICIPANTS')
+        for r in recs:
+            print(_fmt_row(r))
+        print(f'--- {len(recs)} result(s)')
+
+
+    def cmd_search(args: argparse.Namespace) -> int:
+        q = urllib.parse.quote(args.query)
+        data = _api(f'/api/recordings?q={q}&per_page=50')
+        recs = data.get('recordings', [])
+        _print_rows(recs)
+        return 0
+
+
+    def cmd_recent(args: argparse.Namespace) -> int:
+        since = (dt.date.today() - dt.timedelta(days=args.days - 1)).isoformat()
+        # Speakr supports `date:YYYY-MM-DD` for a single day but not ranges;
+        # pull a generous window and filter client-side.
+        data = _api(f'/api/recordings?per_page=100')
+        recs = [
+            r for r in data.get('recordings', [])
+            if r.get('status') == 'COMPLETED'
+            and (r.get('meeting_date') or '')[:10] >= since
+        ]
+        recs.sort(key=lambda r: (r.get('meeting_date') or ''), reverse=True)
+        _print_rows(recs)
+        return 0
+
+
+    def cmd_show(args: argparse.Namespace) -> int:
+        rec = _api(f'/api/recordings/{args.id}')
+        print(f'ID:           {rec.get("id")}')
+        print(f'Title:        {rec.get("title", "Untitled")}')
+        print(f'Date:         {rec.get("meeting_date", "?")}')
+        print(f'Participants: {rec.get("participants", "?")}')
+        tags = ', '.join(t.get('name', '') for t in rec.get('tags', []))
+        print(f'Tags:         {tags or "-"}')
+        print(f'Status:       {rec.get("status", "?")}')
+        summary = (rec.get('summary') or '').strip()
+        if summary:
+            print('--- Summary ---')
+            print(summary)
+        return 0
+
+
+    def cmd_get(args: argparse.Namespace) -> int:
+        rec = _api(f'/api/recordings/{args.id}')
+        t = rec.get('transcription', [])
+        out = [
+            f'# Transcript: {rec.get("title", "Untitled")}',
+            f'# ID: {rec.get("id")}',
+            f'# Participants: {rec.get("participants", "Unknown")}',
+            f'# Date: {rec.get("meeting_date", "Unknown")}',
+            f'# Segments: {len(t) if isinstance(t, list) else "plain-text"}',
+        ]
+        if isinstance(t, list) and t:
+            last = t[-1]
+            out.append(f'# Duration: {last.get("end", last.get("end_time", "unknown"))}s')
+        out.append('---')
+        if isinstance(t, list):
+            for seg in t:
+                speaker = seg.get('speaker', '?')
+                text = seg.get('text', seg.get('sentence', ''))
+                start = seg.get('start', seg.get('start_time', 0)) or 0
+                out.append(f'[{int(start//60):02d}:{int(start%60):02d}] {speaker}: {text}')
+        else:
+            out.append(str(t))
+        body = '\n'.join(out) + '\n'
+
+        path = args.out or f'/tmp/speakr-{args.id}.md'
+        with open(path, 'w') as f:
+            f.write(body)
+        segs = len(t) if isinstance(t, list) else 'plain-text'
+        print(f'Wrote {len(body):,} chars to {path}')
+        print(f'Segments: {segs}')
+        return 0
+
+
+    def main(argv: list[str] | None = None) -> int:
+        p = argparse.ArgumentParser(prog='speakr-cli.py', description=__doc__)
+        sub = p.add_subparsers(dest='cmd', required=True)
+
+        s = sub.add_parser('search', help='search recordings via Speakr q= syntax')
+        s.add_argument('query')
+        s.set_defaults(func=cmd_search)
+
+        r = sub.add_parser('recent', help='recordings completed in the last N days')
+        r.add_argument('--days', type=int, default=7)
+        r.set_defaults(func=cmd_recent)
+
+        sh = sub.add_parser('show', help='print metadata only')
+        sh.add_argument('id')
+        sh.set_defaults(func=cmd_show)
+
+        g = sub.add_parser('get', help='write full transcript to disk')
+        g.add_argument('id')
+        g.add_argument('--out', default=None, help='output path (default /tmp/speakr-<id>.md)')
+        g.set_defaults(func=cmd_get)
+
+        args = p.parse_args(argv)
+        try:
+            return args.func(args)
+        except urllib.error.HTTPError as e:
+            print(f'HTTP {e.code}: {e.reason}', file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f'{type(e).__name__}: {e}', file=sys.stderr)
+            return 1
+
+
+    if __name__ == '__main__':
+        raise SystemExit(main())

@@ -273,6 +273,14 @@ spec:
               mountPath: /data/.zeroclaw/workspace/skills/team-coordination/SKILL.md
               subPath: team-coordination.md
               readOnly: true
+            - name: skill-speakr-lookup
+              mountPath: /data/.zeroclaw/workspace/skills/speakr-lookup/SKILL.md
+              subPath: speakr-lookup.md
+              readOnly: true
+            - name: skill-speakr-lookup
+              mountPath: /data/.zeroclaw/workspace/skills/speakr-lookup/speakr-cli.py
+              subPath: speakr-cli.py
+              readOnly: true
         - name: signal-api-adapter
           image: citizendaniel/signal-api-adapter:v1.3.0
           imagePullPolicy: Always
@@ -346,6 +354,15 @@ spec:
         - name: skill-team-coordination
           configMap:
             name: zeroclaw-skill-team-coordination
+        - name: skill-speakr-lookup
+          configMap:
+            name: zeroclaw-skill-speakr-lookup
+            items:
+              - key: speakr-lookup.md
+                path: speakr-lookup.md
+              - key: speakr-cli.py
+                path: speakr-cli.py
+                mode: 0755
         - name: acp-client
           configMap:
             name: acp-client
