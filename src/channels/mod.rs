@@ -3680,15 +3680,20 @@ or tune thresholds in config.",
             .clone()
     };
     let _conversation_guard = conversation_lock.lock().await;
+    // Resolve the session id once up front so we can both open the
+    // session manager AND thread the id into `TURN_CONTEXT` for
+    // capability-bridging tools (e.g. `ask_walter`) that need to
+    // correlate async replies back to this conversation.
+    let turn_session_id = resolve_session_id(
+        &ctx.session_config,
+        msg.sender.as_str(),
+        Some(msg.channel.as_str()),
+    );
+    tracing::debug!(session_id = %turn_session_id, "session_id resolved");
+
     let mut session: Option<Session> = None;
     if let Some(manager) = ctx.session_manager.as_ref() {
-        let session_id = resolve_session_id(
-            &ctx.session_config,
-            msg.sender.as_str(),
-            Some(msg.channel.as_str()),
-        );
-        tracing::debug!(session_id, "session_id resolved");
-        match manager.get_or_create(&session_id).await {
+        match manager.get_or_create(&turn_session_id).await {
             Ok(opened) => {
                 session = Some(opened);
             }
@@ -4132,41 +4137,46 @@ or tune thresholds in config.",
             () = cancellation_token.cancelled() => LlmExecutionResult::Cancelled,
             result = tokio::time::timeout(
                 Duration::from_secs(timeout_budget_secs),
-                crate::agent::loop_::scope_cost_enforcement_context(
-                    cost_enforcement_context.clone(),
-                    run_tool_call_loop_with_non_cli_approval_context(
-                        active_provider.as_ref(),
-                        &mut history,
-                        ctx.tools_registry.as_ref(),
-                        ctx.observer.as_ref(),
-                        route.provider.as_str(),
-                        route.model.as_str(),
-                        attempt_temperature,
-                        true,
-                        Some(ctx.approval_manager.as_ref()),
-                        msg.channel.as_str(),
-                        attempt_approval_ctx,
-                        &runtime_defaults.multimodal,
-                        runtime_defaults.max_tool_iterations,
-                        Some(cancellation_token.clone()),
-                        attempt_delta_tx,
-                        ctx.hooks.as_deref(),
-                        &excluded_tools_snapshot,
-                        progress_mode,
-                        ctx.safety_heartbeat.clone(),
-                        runtime_defaults.strip_prior_reasoning,
-                        Some(crate::agent::loop_::ToolLoopCompactionContext {
-                            memory: Some(std::sync::Arc::clone(&ctx.memory)),
-                            max_history_messages: MAX_CHANNEL_HISTORY,
-                            context_window_tokens: runtime_defaults.context_window_tokens,
-                        }),
-                        Some(crate::agent::loop_::detection::LoopDetectionConfig {
-                            no_progress_threshold: runtime_defaults.loop_detection_no_progress_threshold,
-                            ping_pong_cycles: runtime_defaults.loop_detection_ping_pong_cycles,
-                            failure_streak_threshold: runtime_defaults.loop_detection_failure_streak,
-                        }),
-                        if recovery_attempt == 0 { injection_rx_opt.take() } else { None },
-                        ctx.native_tool_calls_only,
+                crate::agent::turn_context::with_turn_full(
+                    Some(turn_session_id.clone()),
+                    Some(msg.channel.clone()),
+                    Some(msg.sender.clone()),
+                    crate::agent::loop_::scope_cost_enforcement_context(
+                        cost_enforcement_context.clone(),
+                        run_tool_call_loop_with_non_cli_approval_context(
+                            active_provider.as_ref(),
+                            &mut history,
+                            ctx.tools_registry.as_ref(),
+                            ctx.observer.as_ref(),
+                            route.provider.as_str(),
+                            route.model.as_str(),
+                            attempt_temperature,
+                            true,
+                            Some(ctx.approval_manager.as_ref()),
+                            msg.channel.as_str(),
+                            attempt_approval_ctx,
+                            &runtime_defaults.multimodal,
+                            runtime_defaults.max_tool_iterations,
+                            Some(cancellation_token.clone()),
+                            attempt_delta_tx,
+                            ctx.hooks.as_deref(),
+                            &excluded_tools_snapshot,
+                            progress_mode,
+                            ctx.safety_heartbeat.clone(),
+                            runtime_defaults.strip_prior_reasoning,
+                            Some(crate::agent::loop_::ToolLoopCompactionContext {
+                                memory: Some(std::sync::Arc::clone(&ctx.memory)),
+                                max_history_messages: MAX_CHANNEL_HISTORY,
+                                context_window_tokens: runtime_defaults.context_window_tokens,
+                            }),
+                            Some(crate::agent::loop_::detection::LoopDetectionConfig {
+                                no_progress_threshold: runtime_defaults.loop_detection_no_progress_threshold,
+                                ping_pong_cycles: runtime_defaults.loop_detection_ping_pong_cycles,
+                                failure_streak_threshold: runtime_defaults.loop_detection_failure_streak,
+                            }),
+                            if recovery_attempt == 0 { injection_rx_opt.take() } else { None },
+                            ctx.native_tool_calls_only,
+                        ),
                     ),
                 ),
             ) => LlmExecutionResult::Completed(result),

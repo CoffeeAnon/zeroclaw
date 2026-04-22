@@ -1,23 +1,29 @@
 //! A2A delegation tool — Sam-side "ask Walter asynchronously".
 //!
-//! When invoked, this tool:
+//! The ra2a 0.10.1 push path is broken when the handler returns early
+//! (see `wiki/services/ra2a-limitations.md`), so we use a sync-to-inbox
+//! shim instead:
 //!
-//! 1. Generates a `(task_id, token)` pair and POSTs `message/send` to
-//!    Walter's `:3001/` with a `pushNotificationConfig` pointing at Sam's
-//!    webhook (`ZEROCLAW_A2A_WEBHOOK_URL`).
-//! 2. Persists the token into `push_notification_configs` so Sam's
-//!    webhook handler can validate the bearer when Walter pushes back.
-//! 3. Persists correlation metadata (task_id, session_id, prompt) into
-//!    `a2a_delegations` so the follow-up inbox-drain turn can reuse the
-//!    original session id and Sam has memory continuity from the delegate
-//!    call to the eventual reply.
-//! 4. Returns immediately with a short status string — the LLM is
-//!    expected to tell the user it's following up and end its turn.
-//!    Walter's answer arrives later as a synthetic `[A2A inbound …]`
-//!    prompt to a fresh reasoning turn scoped to the same session.
+//! 1. The tool spawns a background tokio task and returns immediately.
+//! 2. The background task POSTs `message/send` in blocking mode and
+//!    waits for Walter's full agent run to complete (up to Walter's
+//!    executor timeout, default 300 s).
+//! 3. On success it writes `a2a_delegations` (for session correlation),
+//!    `push_notification_configs` (so the existing webhook path still
+//!    works if we ever get push delivery working), and `inbox_events`
+//!    (the wake/resume trigger the drain polls).
+//! 4. The inbox drain picks up the row within ~5 s and dispatches a new
+//!    agent turn with Sam's original session id, so memory continuity
+//!    from the delegate call through the reply is preserved.
+//!
+//! On background-task failure we still write an `inbox_events` row with
+//! a failure payload so Sam's next turn can tell the user what went
+//! wrong instead of silently never replying.
 //!
 //! Registration is gated on the `a2a` Cargo feature AND
 //! `ZEROCLAW_USE_A2A_DELEGATION=true` at startup.
+
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -25,9 +31,9 @@ use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tokio::sync::OnceCell;
-use zeroclaw_core::a2a::delegation::A2ADelegationClient;
+use zeroclaw_core::a2a::delegation::{A2ADelegationClient, DelegationHandle};
 
-use crate::agent::turn_context::current_session_id;
+use crate::agent::turn_context::{current_channel_binding, current_session_id};
 use crate::tools::traits::{Tool, ToolResult};
 
 pub struct A2ADelegateTool {
@@ -37,8 +43,17 @@ pub struct A2ADelegateTool {
 
 impl A2ADelegateTool {
     pub fn new() -> Self {
+        // Walter's executor caps individual runs at 300 s by default
+        // (`ZEROCLAW_A2A_TASK_TIMEOUT_SECS`). We hold the blocking POST
+        // open at least that long plus a buffer for HTTP overhead —
+        // reqwest's default has no overall timeout, which would leak
+        // connections if Walter hung forever.
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(360))
+            .build()
+            .expect("reqwest client with timeout");
         Self {
-            http: reqwest::Client::new(),
+            http,
             pool: OnceCell::new(),
         }
     }
@@ -119,7 +134,8 @@ impl Tool for A2ADelegateTool {
             .get("prompt")
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
-            .context("ask_walter requires a non-empty `prompt` string argument")?;
+            .context("ask_walter requires a non-empty `prompt` string argument")?
+            .to_string();
 
         let webhook_url = std::env::var("ZEROCLAW_A2A_WEBHOOK_URL")
             .context("ZEROCLAW_A2A_WEBHOOK_URL must be set for A2A delegation")?;
@@ -127,62 +143,195 @@ impl Tool for A2ADelegateTool {
             "http://zeroclaw-k8s-agent.ai-agents.svc.cluster.local:3001".to_string()
         });
 
-        let client =
-            A2ADelegationClient::new(self.http.clone(), walter_a2a_url, webhook_url.clone());
-        let handle = client
-            .delegate(prompt)
+        // Resolve the pool on the caller's task so failures here surface
+        // inline rather than disappearing into a background task.
+        let pool = self
+            .pool()
             .await
-            .context("A2A delegation POST to Walter failed")?;
-
-        let pool = self.pool().await.context("A2A delegation DB pool")?;
+            .context("A2A delegation DB pool")?
+            .clone();
         let session_id = current_session_id();
+        let (channel, sender) = current_channel_binding();
+        let http = self.http.clone();
 
-        // push_notification_configs: bearer-token store Sam's webhook
-        // validates against when Walter pushes the reply back.
-        sqlx::query(
-            "INSERT INTO push_notification_configs (task_id, config_id, url, token)
-             VALUES ($1, '', $2, $3)
-             ON CONFLICT (task_id, config_id) DO UPDATE
-               SET url = EXCLUDED.url, token = EXCLUDED.token",
-        )
-        .bind(&handle.task_id)
-        .bind(&webhook_url)
-        .bind(&handle.token)
-        .execute(pool)
-        .await
-        .context("persist push_notification_configs")?;
-
-        // a2a_delegations: correlation so the follow-up inbox turn can
-        // resume Sam's original session (memory continuity).
-        sqlx::query(
-            "INSERT INTO a2a_delegations (task_id, session_id, prompt)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (task_id) DO NOTHING",
-        )
-        .bind(&handle.task_id)
-        .bind(&session_id)
-        .bind(prompt)
-        .execute(pool)
-        .await
-        .context("persist a2a_delegations")?;
-
-        tracing::info!(
-            task_id = %handle.task_id,
-            session_id = ?session_id,
-            prompt_len = prompt.len(),
-            "ask_walter: delegated to Walter"
-        );
+        tokio::spawn(async move {
+            let client = A2ADelegationClient::new(http, walter_a2a_url, webhook_url.clone());
+            run_delegation(
+                client, pool, webhook_url, session_id, channel, sender, prompt,
+            )
+            .await;
+        });
 
         Ok(ToolResult {
             success: true,
-            output: format!(
-                "Delegated to Walter as task `{}`. His response will arrive as a \
-                 follow-up message to you, typically within 1–5 minutes. Tell the \
-                 user you've asked Walter and will follow up when he replies, then \
-                 end your turn.",
-                handle.task_id
-            ),
+            output: "Delegated to Walter. His response will arrive as a follow-up \
+                    message to you, typically within 1–5 minutes. Tell the user \
+                    you've asked Walter and will follow up when he replies, then \
+                    end your turn."
+                .to_string(),
             error: None,
         })
     }
+}
+
+async fn run_delegation(
+    client: A2ADelegationClient,
+    pool: PgPool,
+    webhook_url: String,
+    session_id: Option<String>,
+    channel: Option<String>,
+    sender: Option<String>,
+    prompt: String,
+) {
+    match client.delegate(&prompt).await {
+        Ok(handle) => {
+            tracing::info!(
+                task_id = %handle.task_id,
+                session_id = ?session_id,
+                channel = ?channel,
+                prompt_len = prompt.len(),
+                "ask_walter: Walter replied, writing to inbox"
+            );
+            if let Err(e) = persist_success(
+                &pool,
+                &webhook_url,
+                &session_id,
+                &channel,
+                &sender,
+                &prompt,
+                &handle,
+            )
+            .await
+            {
+                tracing::error!(
+                    task_id = %handle.task_id,
+                    error = ?e,
+                    "ask_walter: failed to persist Walter's reply; Sam will not be woken"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = ?session_id,
+                channel = ?channel,
+                error = ?e,
+                "ask_walter: delegation to Walter failed; writing failure inbox event"
+            );
+            if let Err(persist_err) =
+                persist_failure(&pool, &session_id, &channel, &sender, &prompt, &e).await
+            {
+                tracing::error!(
+                    error = ?persist_err,
+                    "ask_walter: failed to persist failure inbox event; Sam will not be woken"
+                );
+            }
+        }
+    }
+}
+
+async fn persist_success(
+    pool: &PgPool,
+    webhook_url: &str,
+    session_id: &Option<String>,
+    channel: &Option<String>,
+    sender: &Option<String>,
+    prompt: &str,
+    handle: &DelegationHandle,
+) -> Result<()> {
+    // Keep the push store consistent — if we ever move off the sync shim,
+    // Walter's eventual push would need this row to validate its bearer.
+    sqlx::query(
+        "INSERT INTO push_notification_configs (task_id, config_id, url, token)
+         VALUES ($1, '', $2, $3)
+         ON CONFLICT (task_id, config_id) DO UPDATE
+           SET url = EXCLUDED.url, token = EXCLUDED.token",
+    )
+    .bind(&handle.task_id)
+    .bind(webhook_url)
+    .bind(&handle.token)
+    .execute(pool)
+    .await
+    .context("persist push_notification_configs")?;
+
+    sqlx::query(
+        "INSERT INTO a2a_delegations (task_id, session_id, prompt, channel, sender)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (task_id) DO NOTHING",
+    )
+    .bind(&handle.task_id)
+    .bind(session_id)
+    .bind(prompt)
+    .bind(channel)
+    .bind(sender)
+    .execute(pool)
+    .await
+    .context("persist a2a_delegations")?;
+
+    // `payload_json` here mirrors the ra2a push envelope shape the
+    // webhook writes — `{ "task": <Task> }` — so the inbox drain's
+    // existing dispatch logic doesn't need to branch on source.
+    let payload = serde_json::json!({ "task": handle.task.clone() });
+
+    sqlx::query(
+        r#"
+        INSERT INTO inbox_events (id, task_id, sequence, payload_json)
+        VALUES (gen_random_uuid(), $1, 0, $2)
+        ON CONFLICT (task_id, sequence) DO NOTHING
+        "#,
+    )
+    .bind(&handle.task_id)
+    .bind(&payload)
+    .execute(pool)
+    .await
+    .context("persist inbox_events")?;
+
+    Ok(())
+}
+
+async fn persist_failure(
+    pool: &PgPool,
+    session_id: &Option<String>,
+    channel: &Option<String>,
+    sender: &Option<String>,
+    prompt: &str,
+    error: &anyhow::Error,
+) -> Result<()> {
+    // Mint a synthetic task id so the drain's correlation lookup still
+    // works. The delegation row gives the next turn enough context to
+    // tell the user what went wrong.
+    let task_id = uuid::Uuid::new_v4().to_string();
+
+    sqlx::query(
+        "INSERT INTO a2a_delegations (task_id, session_id, prompt, channel, sender)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (task_id) DO NOTHING",
+    )
+    .bind(&task_id)
+    .bind(session_id)
+    .bind(prompt)
+    .bind(channel)
+    .bind(sender)
+    .execute(pool)
+    .await
+    .context("persist failure a2a_delegations")?;
+
+    let payload = serde_json::json!({
+        "error": format!("{error:#}"),
+        "note": "ask_walter delegation failed before Walter replied; no task result available"
+    });
+
+    sqlx::query(
+        r#"
+        INSERT INTO inbox_events (id, task_id, sequence, payload_json)
+        VALUES (gen_random_uuid(), $1, 0, $2)
+        ON CONFLICT (task_id, sequence) DO NOTHING
+        "#,
+    )
+    .bind(&task_id)
+    .bind(&payload)
+    .execute(pool)
+    .await
+    .context("persist failure inbox_events")?;
+
+    Ok(())
 }

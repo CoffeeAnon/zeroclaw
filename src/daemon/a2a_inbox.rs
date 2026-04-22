@@ -87,6 +87,13 @@ async fn drain_once(config: &Config, pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
+struct DelegationBinding {
+    session_id: Option<String>,
+    channel: Option<String>,
+    sender: Option<String>,
+}
+
 async fn dispatch_one(
     config: &Config,
     pool: &PgPool,
@@ -98,28 +105,25 @@ async fn dispatch_one(
     // this conversation is in scope during the reply turn. Fall back to
     // a fresh per-row session if no correlation exists (inbound event
     // didn't originate from our ask_walter tool).
-    let correlation = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT session_id FROM a2a_delegations WHERE task_id = $1",
-    )
-    .bind(task_id)
-    .fetch_optional(pool)
-    .await
-    .unwrap_or(None)
-    .flatten();
+    let binding = lookup_delegation(pool, task_id).await;
 
     let pretty = serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string());
-    let prelude = if correlation.is_some() {
+    let prelude = if binding.session_id.is_some() {
         format!(
             "[A2A reply to your earlier delegation — task {task_id}]\n\
              Review your recent conversation for the original request. Walter's \
              response payload follows:\n\n{pretty}\n\n\
-             Relay Walter's answer back to whoever asked, using whatever channel \
-             this conversation is on."
+             Summarize Walter's answer in your own words and address it to the \
+             original asker. Your reply text will be delivered back to them \
+             automatically — do NOT attempt to call a channel-send tool yourself."
         )
     } else {
         format!("[A2A inbound from task {task_id}]\n{pretty}")
     };
-    let session_id = correlation.or_else(|| Some(format!("a2a_inbox_{row_id}")));
+    let session_id = binding
+        .session_id
+        .clone()
+        .or_else(|| Some(format!("a2a_inbox_{row_id}")));
 
     let run_result = crate::agent::loop_::run(
         config.clone(),
@@ -138,6 +142,7 @@ async fn dispatch_one(
     match run_result {
         Ok(output) => {
             tracing::info!(%task_id, %row_id, output_len = output.len(), "a2a inbox event processed");
+            deliver_to_channel(task_id, row_id, &binding, &output).await;
             if let Err(e) = mark_processed(pool, row_id).await {
                 // Loud error: we just ran the agent turn successfully but can't
                 // persist "done", so the next poll will re-dispatch. This risks
@@ -155,6 +160,64 @@ async fn dispatch_one(
     }
 }
 
+async fn lookup_delegation(pool: &PgPool, task_id: &str) -> DelegationBinding {
+    let row = sqlx::query(
+        "SELECT session_id, channel, sender FROM a2a_delegations WHERE task_id = $1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await;
+
+    match row {
+        Ok(Some(r)) => DelegationBinding {
+            session_id: r
+                .try_get::<Option<String>, _>("session_id")
+                .ok()
+                .flatten(),
+            channel: r.try_get::<Option<String>, _>("channel").ok().flatten(),
+            sender: r.try_get::<Option<String>, _>("sender").ok().flatten(),
+        },
+        Ok(None) => DelegationBinding::default(),
+        Err(e) => {
+            tracing::warn!(%task_id, "a2a_delegations lookup failed: {e:#}");
+            DelegationBinding::default()
+        }
+    }
+}
+
+async fn deliver_to_channel(
+    task_id: &str,
+    row_id: uuid::Uuid,
+    binding: &DelegationBinding,
+    output: &str,
+) {
+    let (Some(channel_name), Some(recipient)) = (binding.channel.as_deref(), binding.sender.as_deref())
+    else {
+        return;
+    };
+
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        tracing::warn!(%task_id, %row_id, channel = %channel_name,
+            "a2a reply had empty agent output; nothing to send to channel");
+        return;
+    }
+
+    let Some(channel) = crate::channels::get_live_channel(channel_name) else {
+        tracing::warn!(%task_id, %row_id, channel = %channel_name,
+            "no live channel registered; dropping reply delivery");
+        return;
+    };
+
+    let message = crate::channels::traits::SendMessage::new(trimmed, recipient);
+    match channel.send(&message).await {
+        Ok(()) => tracing::info!(%task_id, %row_id, channel = %channel_name, recipient = %recipient,
+            "a2a reply delivered to channel"),
+        Err(e) => tracing::error!(%task_id, %row_id, channel = %channel_name, recipient = %recipient,
+            "a2a reply delivery failed: {e:#}"),
+    }
+}
+
 async fn mark_processed(pool: &PgPool, row_id: uuid::Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE inbox_events SET processed_at = NOW() WHERE id = $1::uuid")
         .bind(row_id.to_string())
@@ -162,6 +225,7 @@ async fn mark_processed(pool: &PgPool, row_id: uuid::Uuid) -> Result<(), sqlx::E
         .await?;
     Ok(())
 }
+
 
 async fn build_pool(dsn: &str, schema: &str) -> Result<PgPool> {
     // Same pattern as gateway::a2a::build_pool — libpq `options` query

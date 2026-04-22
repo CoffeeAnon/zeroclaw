@@ -1,32 +1,34 @@
 //! Sam-side A2A delegation helper.
 //!
-//! Wraps the JSON-RPC `message/send` POST to Walter's `:3001/` endpoint,
-//! attaching a `pushNotificationConfig` so the result is pushed back to
-//! Sam's webhook instead of returned synchronously.
+//! Wraps the JSON-RPC `message/send` POST to Walter's `:3001/` endpoint.
+//! The call runs in blocking mode — ra2a 0.10.1's `returnImmediately: true`
+//! path drops its broadcast receiver before the executor's terminal event
+//! arrives, so the push callback never fires. See
+//! `wiki/services/ra2a-limitations.md` for the full trace.
 //!
-//! The helper only owns the HTTP request. The caller is responsible for:
-//!
-//! 1. Persisting the returned `(task_id, token)` into Sam's
-//!    `push_notification_configs` table before the POST returns, so that
-//!    Sam's webhook handler can validate the bearer token when Walter
-//!    pushes the completion back. (Order matters: if Walter is fast
-//!    enough to push back before the insert lands, the webhook will
-//!    reject the first notification as an unknown token.)
-//! 2. Blocking / returning to the reasoning loop appropriately while
-//!    waiting for the webhook to fire — the delegation call itself
-//!    returns as soon as Walter acknowledges the `message/send`.
+//! Instead, we hold the HTTP connection open for the full agent run,
+//! read Walter's completion out of the synchronous response, and let the
+//! caller shim that back into Sam's inbox so the wake/resume semantics
+//! are preserved at the Sam-side (see `src/tools/a2a_delegate.rs`).
 
 use anyhow::{Context, Result};
-use serde_json::json;
+use serde_json::{json, Value};
 
-/// Opaque handle to an in-flight delegation. The caller must persist the
-/// `(task_id, token)` pair before reading Walter's eventual push.
+/// Result of a completed delegation. Carries the server-minted task id
+/// alongside Walter's final task snapshot so the caller can persist it
+/// to Sam's inbox without any further round-trips.
 #[derive(Debug, Clone)]
 pub struct DelegationHandle {
     pub task_id: String,
-    /// Random bearer token Walter will echo back in the `Authorization`
-    /// header when it posts the completion update to Sam's webhook.
+    /// Random bearer token registered with Walter's push config. Kept on
+    /// the handle so Sam's `push_notification_configs` row stays in sync
+    /// with what Walter would push *if* the push path ever gets used in
+    /// this direction. Not currently consumed by the sync-to-inbox shim.
     pub token: String,
+    /// Walter's response task object (`result.task` from the JSON-RPC
+    /// envelope). Forwarded verbatim into `inbox_events.payload_json` so
+    /// the inbox drain can hand it to Sam's next agent turn.
+    pub task: Value,
 }
 
 /// Thin A2A client configured for the Sam → Walter delegation path.
@@ -58,14 +60,25 @@ impl A2ADelegationClient {
         Ok(Self::new(reqwest::Client::new(), walter_a2a_url, webhook_url))
     }
 
-    /// Send `prompt` to Walter as the body of an A2A `message/send` request
-    /// and register a push-notification callback pointing at Sam's webhook.
+    /// Send `prompt` to Walter and block until the agent run completes.
     ///
-    /// Returns the generated `(task_id, token)` pair — the caller should
-    /// persist these into `push_notification_configs` so the webhook can
-    /// validate the eventual inbound bearer.
+    /// Returns Walter's final `result.task` value alongside the server-
+    /// minted task id. The HTTP connection is held for the full duration
+    /// of the run (5-minute default cap enforced by Walter's executor);
+    /// callers should spawn this on a background task so Sam's main
+    /// reasoning loop isn't blocked.
     pub async fn delegate(&self, prompt: &str) -> Result<DelegationHandle> {
-        let task_id = uuid::Uuid::new_v4().to_string();
+        // Wire-format notes (see wiki/services/ra2a-limitations.md):
+        //   - `message.taskId` MUST be omitted. A client-provided id is
+        //     treated as a reference to an existing task and ra2a returns
+        //     `-32603 task not found`.
+        //   - Push config key is `taskPushNotificationConfig`. We keep it
+        //     on the request so Walter's push store stays populated — if
+        //     we later move off the sync shim, the push path is already
+        //     wired from Sam's side.
+        //   - `returnImmediately` is left at its default (`false`). The
+        //     early-return path is broken in ra2a 0.10.1 and drops the
+        //     terminal event on the floor.
         let token = uuid::Uuid::new_v4().to_string();
         let message_id = uuid::Uuid::new_v4().to_string();
 
@@ -77,11 +90,10 @@ impl A2ADelegationClient {
                 "message": {
                     "role": "ROLE_USER",
                     "messageId": message_id,
-                    "taskId": task_id,
                     "parts": [{"text": prompt}],
                 },
                 "configuration": {
-                    "pushNotificationConfig": {
+                    "taskPushNotificationConfig": {
                         "url": self.webhook_url,
                         "token": token,
                     }
@@ -98,11 +110,39 @@ impl A2ADelegationClient {
             .with_context(|| format!("POST {} failed", self.walter_a2a_url))?;
 
         let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .with_context(|| format!("read body from {}", self.walter_a2a_url))?;
+
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Walter A2A returned {status}: {text}");
+            anyhow::bail!("Walter A2A returned HTTP {status}: {text}");
         }
 
-        Ok(DelegationHandle { task_id, token })
+        // JSON-RPC errors come back with HTTP 200 and an `error` field;
+        // checking only the HTTP status silently accepts them.
+        let envelope: Value = serde_json::from_str(&text)
+            .with_context(|| format!("parse JSON-RPC envelope from {}: {text}", self.walter_a2a_url))?;
+
+        if let Some(err) = envelope.get("error") {
+            anyhow::bail!("Walter A2A JSON-RPC error: {err}");
+        }
+
+        let task = envelope
+            .pointer("/result/task")
+            .cloned()
+            .with_context(|| format!("missing result.task in Walter response: {text}"))?;
+
+        let task_id = task
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .with_context(|| format!("missing result.task.id in Walter response: {text}"))?;
+
+        Ok(DelegationHandle {
+            task_id,
+            token,
+            task,
+        })
     }
 }

@@ -34,6 +34,10 @@ static MIGRATIONS: &[(&str, &str)] = &[
         "20260420000001_create_a2a_delegations",
         include_str!("../migrations/20260420000001_create_a2a_delegations.sql"),
     ),
+    (
+        "20260421000001_add_a2a_delegations_channel_sender",
+        include_str!("../migrations/20260421000001_add_a2a_delegations_channel_sender.sql"),
+    ),
 ];
 
 pub async fn apply(pool: &PgPool) -> Result<(), sqlx::Error> {

@@ -57,3 +57,4 @@ result
 .tmp/docker-push-v137.log
 .tmp/docker-push.log
 .codex
+.vscode/
