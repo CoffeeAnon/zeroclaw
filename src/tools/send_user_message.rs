@@ -29,7 +29,8 @@ impl Tool for SendUserMessageTool {
         "Proactively send a message to a user on a specific channel. Messages are gated by quiet \
          hours and rate limits. During quiet hours, messages are queued for delivery when the \
          window ends. Use this to notify users of important events (e.g. failed deliveries, \
-         completed tasks)."
+         completed tasks). If `recipient` is omitted, the channel's configured default recipient \
+         is used (see `[proactive_messaging.default_recipients]` in config)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -42,7 +43,8 @@ impl Tool for SendUserMessageTool {
                 },
                 "recipient": {
                     "type": "string",
-                    "description": "The recipient identifier (phone number, user ID, chat ID, etc.)"
+                    "description": "The recipient identifier (phone number, user ID, chat ID, etc.). \
+                                    Optional when a default recipient is configured for this channel."
                 },
                 "message": {
                     "type": "string",
@@ -54,7 +56,7 @@ impl Tool for SendUserMessageTool {
                     "description": "Message priority. 'urgent' bypasses quiet hours. Default: 'normal'"
                 }
             },
-            "required": ["channel", "recipient", "message"]
+            "required": ["channel", "message"]
         })
     }
 
@@ -83,12 +85,27 @@ impl Tool for SendUserMessageTool {
             .filter(|v| !v.is_empty())
             .ok_or_else(|| anyhow::anyhow!("Missing 'channel' parameter"))?;
 
-        let recipient = args
+        let recipient_arg = args
             .get("recipient")
             .and_then(|v| v.as_str())
             .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'recipient' parameter"))?;
+            .filter(|v| !v.is_empty());
+        let recipient: &str = match recipient_arg {
+            Some(r) => r,
+            None => self
+                .config
+                .proactive_messaging
+                .default_recipients
+                .get(channel)
+                .map(String::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Missing 'recipient' parameter and no default recipient \
+                         configured for channel '{channel}' \
+                         (set [proactive_messaging.default_recipients.{channel}] in config)"
+                    )
+                })?,
+        };
 
         let message = args
             .get("message")
@@ -216,8 +233,30 @@ mod tests {
         let schema = tool.parameters_schema();
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("channel")));
-        assert!(required.contains(&json!("recipient")));
         assert!(required.contains(&json!("message")));
+        // `recipient` is optional — falls back to a configured default when omitted.
+        assert!(!required.contains(&json!("recipient")));
+    }
+
+    #[tokio::test]
+    async fn missing_recipient_without_default_errors() {
+        let config = Arc::new(Config::default());
+        let security = test_security(AutonomyLevel::Full, 100);
+        let tool = SendUserMessageTool::new(config, security);
+
+        let result = tool
+            .execute(json!({
+                "channel": "signal",
+                "message": "hello"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("default recipient") && err.contains("signal"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

@@ -108,6 +108,14 @@ data:
       end_hour = 7
       timezone = "America/Edmonton"
 
+      # Default recipients for `send_user_message` when the `recipient`
+      # arg is omitted (e.g. isolated cron sessions with no inbound
+      # message context). Dan's Signal UUID so Sam can notify him from
+      # task-queue-check / vikunja-task-review without being told who
+      # to send to.
+      [proactive_messaging.default_recipients]
+      signal = "9de6f614-9b94-4264-ba2d-7e07a05979fe"
+
       [goal_loop]
       enabled = true
       interval_minutes = 30

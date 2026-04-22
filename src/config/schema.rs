@@ -4722,6 +4722,15 @@ pub struct ProactiveMessagingConfig {
     /// Queue configuration for deferred messages.
     #[serde(default)]
     pub queue: ProactiveMessagingQueueConfig,
+    /// Per-channel default recipient identifiers. When a `send_user_message`
+    /// call omits the `recipient` argument, the default configured for the
+    /// channel is used. Intended for isolated cron sessions where there is
+    /// no inbound recipient context but the agent still needs to reach the
+    /// primary user. Keys are channel names (e.g. `"signal"`, `"telegram"`);
+    /// values are channel-specific recipient identifiers (UUID, phone, chat
+    /// id, etc.).
+    #[serde(default)]
+    pub default_recipients: HashMap<String, String>,
 }
 
 impl Default for ProactiveMessagingConfig {
@@ -4731,6 +4740,7 @@ impl Default for ProactiveMessagingConfig {
             quiet_hours: Vec::new(),
             rate_limits: ProactiveMessagingRateLimits::default(),
             queue: ProactiveMessagingQueueConfig::default(),
+            default_recipients: HashMap::new(),
         }
     }
 }

@@ -10,7 +10,7 @@ data:
   task-tracking.md: |
     ---
     name: task-tracking
-    version: 1.2.0
+    version: 1.3.0
     description: >
       Durable task tracking in Vikunja (Sam's inbox, project #3).
       Always resident — consult the body on every inbound Signal
@@ -55,6 +55,33 @@ data:
 
     When in doubt, create the task. Over-tracking costs one CLI
     call; under-tracking loses durable context.
+
+    ## When this skill does NOT apply
+
+    This skill is resident because Sam was losing track of ad-hoc
+    Signal asks (see 2026-04-16 isolation-leak incident). That's
+    its job. It is NOT the right tool when another skill owns the
+    routing for a specific workflow:
+
+    - **Inside a cron session** whose name starts with `speakr-` or
+      contains `meeting-summary` — `daily-meeting-summary` step 3
+      owns Vikunja routing for that run. Action items go to project
+      1 (Dan's inbox) via `vikunja task batch-create 1`, not to
+      Sam's inbox. Skip the first-decision gate entirely; the skill
+      that loaded for the cron already knows what to do.
+    - **Inside the `daily-meeting-summary` skill body** at any
+      time — its step 3 is the authoritative Vikunja path for
+      meeting action items. Do not layer `my-task create` on top.
+    - **Inside the `team-coordination` delegation flow** — the
+      parent `my-task` for Dan's ask is still yours to open, but
+      the code/k8s delegation itself routes via `team-task create`
+      in project 7. Don't double-book the same work.
+
+    The general rule: if a more specific skill owns the destination
+    project for a piece of work, let it win. Over-tracking in your
+    own inbox is no longer cheap when the work belongs somewhere
+    else — a task in the wrong project is worse than no task,
+    because Dan then has to clean up.
 
     ## Workflow
 

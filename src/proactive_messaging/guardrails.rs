@@ -128,6 +128,7 @@ mod tests {
                 max_pending: 100,
                 ttl_hours: 24,
             },
+            default_recipients: Default::default(),
         }
     }
 
