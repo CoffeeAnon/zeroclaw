@@ -38,15 +38,17 @@ data:
 
     All commands print results to stdout. Errors go to stderr and exit 1.
 
-    `search <query>` — search recordings. Passes `q=<query>` to Speakr, which
-    supports `date:today`, `date:YYYY-MM-DD`, `title:<text>`,
-    `participants:<name>`, or free text. Prints one row per hit:
+    `search <query>` — search recordings. Passes `q=<query>` to Speakr.
+    Supported forms: `date:today`, `date:YYYY-MM-DD`, or free text (which
+    matches across title, participants, and summary). The `title:` /
+    `participants:` prefixes are NOT honored by this Speakr instance — use
+    free text instead. Prints one row per hit:
     `<id>  <date>  <title>  <participants>`. Max 50 results.
 
       Examples:
       - `speakr-cli.py search 'date:2026-04-20'`
-      - `speakr-cli.py search 'participants:Tomas'`
-      - `speakr-cli.py search 'title:data pipelines'`
+      - `speakr-cli.py search 'Tomas Kramer'`
+      - `speakr-cli.py search 'optimizing data pipelines'`
       - `speakr-cli.py search 'sprint wrap'`
 
     `recent [--days N]` — recordings COMPLETED in the last N days (default 7).
@@ -115,9 +117,30 @@ data:
             return json.loads(r.read())
 
 
+    def _iso_date(raw: str | None) -> str:
+        """Best-effort normalize a meeting_date to YYYY-MM-DD.
+
+        Speakr returns meeting_date as either ISO ("2026-04-13T06:11:00Z") or
+        human-formatted ("Apr 22, 2026, 2:55:45 PM", sometimes with U+202F
+        narrow no-break space before AM/PM). Return '' if neither parses.
+        """
+        if not raw:
+            return ''
+        s = raw.replace(' ', ' ').replace('\xa0', ' ').strip()
+        # ISO with T or space separator
+        if len(s) >= 10 and s[4] == '-' and s[7] == '-':
+            return s[:10]
+        for fmt in ('%b %d, %Y, %I:%M:%S %p', '%b %d, %Y, %I:%M %p', '%b %d, %Y'):
+            try:
+                return dt.datetime.strptime(s, fmt).date().isoformat()
+            except ValueError:
+                continue
+        return ''
+
+
     def _fmt_row(rec: dict) -> str:
         rid = rec.get('id', '?')
-        date = (rec.get('meeting_date') or '')[:10] or '????-??-??'
+        date = _iso_date(rec.get('meeting_date')) or '????-??-??'
         title = (rec.get('title') or 'Untitled').strip()
         if len(title) > 50:
             title = title[:47] + '...'
@@ -148,14 +171,14 @@ data:
     def cmd_recent(args: argparse.Namespace) -> int:
         since = (dt.date.today() - dt.timedelta(days=args.days - 1)).isoformat()
         # Speakr supports `date:YYYY-MM-DD` for a single day but not ranges;
-        # pull a generous window and filter client-side.
-        data = _api(f'/api/recordings?per_page=100')
+        # the API default list is newest-first so we pull a window and filter
+        # client-side on the parsed ISO date.
+        data = _api('/api/recordings?per_page=100')
         recs = [
             r for r in data.get('recordings', [])
-            if r.get('status') == 'COMPLETED'
-            and (r.get('meeting_date') or '')[:10] >= since
+            if r.get('status') == 'COMPLETED' and _iso_date(r.get('meeting_date')) >= since
         ]
-        recs.sort(key=lambda r: (r.get('meeting_date') or ''), reverse=True)
+        recs.sort(key=lambda r: _iso_date(r.get('meeting_date')), reverse=True)
         _print_rows(recs)
         return 0
 
