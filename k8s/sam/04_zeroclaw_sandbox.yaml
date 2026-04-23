@@ -241,10 +241,6 @@ spec:
               mountPath: /data/.zeroclaw/workspace/skills/daily-meeting-summary/speakr-fetch.py
               subPath: speakr-fetch.py
               readOnly: true
-            - name: skill-meeting-summary
-              mountPath: /data/.zeroclaw/workspace/skills/daily-meeting-summary/speakr-transcript.py
-              subPath: speakr-transcript.py
-              readOnly: true
             - name: skill-science-curator
               mountPath: /data/.zeroclaw/workspace/skills/science-curator/SKILL.md
               subPath: science-curator.md
@@ -326,9 +322,6 @@ spec:
                 path: daily-meeting-summary.md
               - key: speakr-fetch.py
                 path: speakr-fetch.py
-                mode: 0755
-              - key: speakr-transcript.py
-                path: speakr-transcript.py
                 mode: 0755
         - name: skill-science-curator
           configMap:

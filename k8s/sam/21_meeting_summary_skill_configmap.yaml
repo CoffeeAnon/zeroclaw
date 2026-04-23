@@ -7,28 +7,29 @@ data:
   daily-meeting-summary.md: |
     ---
     name: daily-meeting-summary
-    version: 4.3.0
+    version: 4.4.0
     description: >
-      Process Dan's Speakr meeting recordings into an executive summary,
-      Vikunja tasks, a memory digest, and wiki distillations. Use whenever
-      Dan mentions "today's meetings", "yesterday's standup", action items
-      from a call, decisions made in a meeting, or any reference to recent
-      meeting content — and for the daily cron that fires weekdays at 12:00
-      and 17:00 America/Vancouver.
+      Cron-driven daily rollup of Dan's Speakr recordings into an exec
+      summary, Vikunja tasks in project 1, a memory digest, and wiki
+      distillations. Fires weekdays at 12:00 and 17:00 America/Vancouver.
+      Use whenever the daily cron prompt invokes it. For ad-hoc questions
+      Dan asks about specific past meetings (reframe, details, verbatim
+      content), use the `speakr-lookup` skill instead — this skill owns
+      the scheduled rollup, not interactive lookup.
     always: false
     ---
 
     # Daily Meeting Summary
 
     Speakr (meetings.coffee-anon.com) is Dan's self-hosted meeting
-    transcription app. This skill turns its raw recordings into an exec
-    summary, Vikunja tasks in project 1 (Dan's inbox), a memory breadcrumb,
-    and durable wiki entries.
+    transcription app. This skill is the scheduled pipeline that turns
+    the day's recordings into an exec summary, Vikunja tasks in project
+    1 (Dan's inbox), a memory breadcrumb, and durable wiki entries.
 
-    **Tools:** `shell`, `file_read`, `file_write`, `memory_store`,
-    `memory_recall`, `cron_list`, `cron_add`, `content_search`, `vikunja`.
-    `curl` is unavailable; shipped Python scripts use `urllib`. Do not use
-    Serena — it's scoped to code, not Dan's wiki.
+    For ad-hoc questions about a specific meeting from any day (Dan asks
+    "reframe the Tomas 1:1", "what did we agree on", "pull the transcript
+    for X") — use `speakr-lookup`. It owns on-demand fetch. This skill
+    owns the cron.
 
     ## Runtime rules
 
@@ -55,7 +56,10 @@ data:
     (the primary input for step 2) and a memory/ duplicate. It also
     re-fetches the past 3 days to catch late transcripts and annotations.
 
-    Script stdout is ground truth. Branch on what it prints:
+    Script stdout is ground truth. The exact sentinel strings below are
+    defined by `speakr-fetch.py`; if the script evolves, keep this list
+    in sync or Sam's branching desyncs silently. Branch on what it
+    prints:
 
     - **`NO_CHANGES: ...`** — reply literally `NO_REPLY`, stop. No other
       text. Do not run steps 2-5. This keeps Sam off the LLM budget when
@@ -65,13 +69,13 @@ data:
       last run: ...]`** — continue through steps 2-5. Surface failed /
       pending / garbage counts to Dan in your final reply when non-zero.
     - **`CHANGED sources (late transcripts): files`** — prior days whose
-      transcripts landed since last run. Action items were NEVER captured
+      transcripts landed since last run. Action items were never captured
       by the previous cron. Run step 3 on each of these files (in
       addition to today's primary). Skip step 2 for them (no exec summary
       for prior dates).
     - **`CHANGED sources (annotated): files`** — prior days Dan edited.
-      Re-distill in step 5 only. DO NOT re-run step 3 (originals were
-      captured on the first pass).
+      Re-distill in step 5 only. Do not re-run step 3 — originals were
+      captured on the first pass; re-creating their tasks duplicates them.
 
     ### Step 2 — Executive summary
 
@@ -84,7 +88,8 @@ data:
     file_write /data/workspace/memory/meetings-exec-YYYY-MM-DD.md
     ```
 
-    Use this template verbatim:
+    Keep the four headings exactly (Dan scans for them); wording within
+    each section can follow whatever reads cleanly:
 
     ```markdown
     # Meetings — YYYY-MM-DD
@@ -119,10 +124,13 @@ data:
     heading. Skip vague items ("look into X", "think about Y") — Vikunja
     is for things with a verb, a noun, and ideally a deadline.
 
-    **Never** treat items from these sections as candidates:
-    - `## Action items others owe Dan` — those are for Dan to nudge
-      others, not for him to complete. Creating tasks from them puts
-      other people's obligations on Dan's inbox.
+    Skip items under these sections — they aren't Dan-bucket tasks:
+
+    - `## Action items others owe Dan` — those are for Dan to *nudge*,
+      not do. Filing them as his tasks puts other people's obligations
+      on his inbox. On 2026-04-22 this exact mistake filed 10 other
+      people's action items as Dan's; see `task-tracking` v1.3.0 for
+      the fix.
     - `## Key decisions and issues` — decisions are wiki material
       (step 5), not task material.
 
@@ -209,34 +217,14 @@ data:
     updates dilute the wiki. Update `index.md` and append to `log.md`
     for anything you create or materially change.
 
-    ## On-demand usage (outside the cron)
+    ## Ad-hoc questions → speakr-lookup
 
-    When Dan asks about a specific day:
-
-    1. `memory_recall key=meetings_digest_YYYY-MM-DD`
-    2. `file_read /data/workspace/memory/meetings-exec-YYYY-MM-DD.md`
-    3. `file_read /data/workspace/wiki/sources/meetings-YYYY-MM-DD.md`
-       for full per-meeting detail.
-    4. Files missing → run the fetch script with the date arg, then do
-       step 2 (exec summary) and step 4 (digest) only. Skip step 3 for
-       ad-hoc lookups; old meetings' action items either got handled on
-       the day or Dan creates them by hand.
-
-    ## Full transcript lookup
-
-    ```
-    shell: python3 /data/.zeroclaw/workspace/skills/daily-meeting-summary/speakr-transcript.py RECORDING_ID
-    ```
-
-    Writes `/data/workspace/memory/transcript-RECORDING_ID.md`.
-
-    1. `file_read` with `limit=10` for the header metadata.
-    2. `content_search` over the transcript file for relevant sections,
-       then `file_read` with explicit offset/limit. **Never** load a
-       full transcript in one call — they routinely run tens of
-       thousands of tokens.
-    3. `shell: rm /data/workspace/memory/transcript-RECORDING_ID.md` when
-       you're done.
+    If Dan asks about a specific meeting outside the cron flow — summary
+    of a particular day, a named meeting, a participant, or "fetch the
+    transcript for X" — switch to the `speakr-lookup` skill. It owns
+    search, metadata, and full-transcript fetch. Don't run this skill's
+    steps 1-5 for ad-hoc lookups; they're cron-shaped and will create
+    duplicate tasks and wiki pages.
 
     ## Quick failure triage
 
@@ -557,47 +545,3 @@ data:
     )
     if nothing_to_do:
         print('NO_CHANGES: no new meetings today, nothing pending, no prior-day edits. Exit cleanly.')
-
-  speakr-transcript.py: |
-    #!/usr/bin/env python3
-    """Download a full meeting transcript from Speakr to disk.
-
-    Usage: python3 speakr-transcript.py RECORDING_ID
-    Writes transcript-RECORDING_ID.md to /data/workspace/memory/.
-    """
-    import json, os, sys, urllib.request
-
-    if len(sys.argv) < 2:
-        print('Usage: speakr-transcript.py RECORDING_ID', file=sys.stderr)
-        raise SystemExit(1)
-
-    REC_ID = sys.argv[1]
-    BASE = 'https://meetings.coffee-anon.com'
-    TOKEN = os.environ['SPEAKR_API_TOKEN']
-
-    req = urllib.request.Request(f'{BASE}/api/recordings/{REC_ID}',
-        headers={'Authorization': f'Bearer {TOKEN}'})
-    r = json.loads(urllib.request.urlopen(req).read())
-    t = r.get('transcription', [])
-
-    out = f'# Transcript: {r.get("title", "Untitled")}\n'
-    out += f'# Participants: {r.get("participants", "Unknown")}\n'
-    out += f'# Date: {r.get("meeting_date", "Unknown")}\n'
-    out += f'# Segments: {len(t) if isinstance(t, list) else "plain-text"}\n'
-    if isinstance(t, list) and t:
-        out += f'# Duration: {t[-1].get("end", "unknown")}s\n'
-    out += '---\n'
-    if isinstance(t, list):
-        for seg in t:
-            speaker = seg.get('speaker', '?')
-            text = seg.get('text', seg.get('sentence', ''))
-            start = seg.get('start', seg.get('start_time', 0))
-            out += f'[{int(start//60):02d}:{int(start%60):02d}] {speaker}: {text}\n'
-    else:
-        out += str(t)
-
-    path = f'/data/workspace/memory/transcript-{REC_ID}.md'
-    with open(path, 'w') as f:
-        f.write(out)
-    print(f'Wrote {len(out):,} chars to {path}')
-    print(f'Segments: {len(t) if isinstance(t, list) else "plain-text"}')

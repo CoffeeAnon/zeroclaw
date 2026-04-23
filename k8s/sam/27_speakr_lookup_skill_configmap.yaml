@@ -10,7 +10,7 @@ data:
   speakr-lookup.md: |
     ---
     name: speakr-lookup
-    version: 1.1.0
+    version: 1.2.0
     description: >
       Fetch full meeting transcripts from Speakr on demand. Load this skill
       whenever Dan asks about what was said, discussed, agreed, or decided
@@ -27,19 +27,25 @@ data:
     Fetch meeting transcripts on demand via
     `/data/.zeroclaw/workspace/skills/speakr-lookup/speakr-cli.py`.
 
-    ## Decision rule (read first)
+    ## Which skill for which question
 
-    If Dan asks anything about a past meeting — summarize, reframe, who
-    said, what was agreed, action items, details — the answer is in this
-    skill, even if the meeting is on today's date and the daily-meeting-
-    summary cron already ran.
+    Two meeting-related skills exist and they don't overlap:
 
-    **The daily digest ≠ the transcript.** The digest is a 5-bullet exec
-    summary saved to `/data/workspace/wiki/sources/meetings-YYYY-MM-DD.md`
-    and `/data/workspace/memory/meetings-exec-YYYY-MM-DD.md`. It is
-    lossy. The full transcript lives only in Speakr and must be fetched
-    via `speakr-cli.py get <id>`. If Dan wants reframing, details, or
-    verbatim content — you need the transcript, not the digest.
+    - **`daily-meeting-summary`** — owns the cron that produces the daily
+      exec summary, Vikunja tasks, memory digest, and wiki pages. That's
+      the only surface it owns.
+    - **`speakr-lookup`** (this one) — owns every ad-hoc question Dan
+      asks about a past meeting: verbatim content, reframing, who-said-
+      what, details beyond the 5-bullet digest.
+
+    If Dan says "summarize today's meetings" as a generic ask, the exec
+    summary in `/data/workspace/memory/meetings-exec-YYYY-MM-DD.md` is
+    enough. If he asks about a specific meeting — by title, participant,
+    topic, or "can you reframe/expand/clarify" — you need the transcript.
+
+    **The daily digest ≠ the transcript.** The digest is lossy; it's
+    5 bullets per meeting. The transcript is verbatim and lives only in
+    Speakr. When Dan wants details, reach for `speakr-cli.py get`.
 
     Do NOT reply "I don't have that meeting" or "the transcripts don't
     exist in the workspace" before running at least one `search` query
@@ -69,9 +75,20 @@ data:
     No transcript body. Use this first to confirm you have the right meeting.
 
     `get <id> [--out PATH]` — write the full transcript (speaker-tagged,
-    timestamped) to PATH. Default PATH is `/tmp/speakr-<id>.md`. Prints the
-    path, char count, and segment count. File is scratch — read it with
-    `file_read`, use it, and don't commit it to the wiki.
+    timestamped) to PATH. Default PATH is `/tmp/speakr-<id>.md`. Prints
+    the path, char count, and segment count.
+
+    The default path lives under `/tmp/` deliberately: transcripts run
+    tens of thousands of tokens, Speakr is the source of truth, and
+    keeping stale copies in `/data/workspace/` clutters durable state.
+    Read it with `file_read`, answer Dan, and don't persist it.
+
+    If `show` or `get` reports `Segments: plain-text` the recording
+    wasn't diarized — you'll get a raw string instead of speaker-tagged
+    segments. That happens when Speakr's diarization pipeline skipped
+    the recording or hadn't run yet. Tell Dan it's un-diarized rather
+    than claiming "no transcript" — the content is still there, just
+    without speaker labels.
 
     ## Typical flow
 
@@ -80,9 +97,11 @@ data:
     3. `speakr-cli.py get <id>` → fetch full transcript to `/tmp/`.
     4. `file_read /tmp/speakr-<id>.md` → read as needed.
 
-    If search returns zero hits, broaden the query (drop `title:` prefix,
-    try a participant, widen the date). If it returns many hits, add a
-    date or participant filter.
+    If search returns zero hits, broaden the query: try a participant
+    name as free text, try a topic keyword, or widen the date. If it
+    returns many hits, narrow with a date or specific name. Don't
+    reach for `title:` or `participants:` prefixes — they're silently
+    unsupported (free text already covers both fields).
 
     ## Auth
 
