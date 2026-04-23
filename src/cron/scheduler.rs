@@ -227,7 +227,26 @@ async fn run_agent_job(
         (Some(ch), Some(to)) => format!(" deliver_to:{ch}/{to}"),
         _ => String::new(),
     };
-    let prefixed_prompt = format!("[cron:{} {name}{delivery_suffix}] {prompt}", job.id);
+    // Announce-mode crons auto-deliver the agent's final response via the
+    // configured channel. Tell the agent explicitly so it doesn't also try
+    // to call `send_user_message` — which would either double-send or, more
+    // commonly, confabulate a failure and lace the output with apologetic
+    // reasoning that then gets announced verbatim. See
+    // scrapyard-wiki/incidents/2026-04-23-sam-announce-cron-signal-hallucination.
+    let auto_delivery_note = if job.delivery.mode.eq_ignore_ascii_case("announce") {
+        match (&job.delivery.channel, &job.delivery.to) {
+            (Some(ch), Some(_)) => format!(
+                " auto_delivery:your final response is sent verbatim via {ch} to the configured recipient; do NOT call send_user_message or any other send tool — return the message as your final response."
+            ),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+    let prefixed_prompt = format!(
+        "[cron:{} {name}{delivery_suffix}{auto_delivery_note}] {prompt}",
+        job.id
+    );
     let model_override = job.model.clone();
 
     // Scope memory recall per session target:
