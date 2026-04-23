@@ -10,29 +10,40 @@ data:
   speakr-lookup.md: |
     ---
     name: speakr-lookup
-    version: 1.0.0
+    version: 1.1.0
     description: >
-      On-demand lookup of past meeting transcripts from Speakr. Use when Dan
-      asks a question about a specific meeting (by title, participant, or
-      date) and the answer is not already in memory or today's meeting
-      digest. NOT for the daily summary cron — that has its own skill.
+      Fetch full meeting transcripts from Speakr on demand. Load this skill
+      whenever Dan asks about what was said, discussed, agreed, or decided
+      in any past meeting — by title, participant, date, or topic —
+      INCLUDING meetings the daily-meeting-summary cron already touched.
+      The daily digest has 5-bullet exec summaries; this skill retrieves
+      the verbatim transcript. Never reply "I don't have that meeting"
+      without first running `speakr-cli.py search`.
     always: false
     ---
 
     # Speakr Lookup
 
-    Find and fetch meeting transcripts on demand via
+    Fetch meeting transcripts on demand via
     `/data/.zeroclaw/workspace/skills/speakr-lookup/speakr-cli.py`.
 
-    ## When to use
+    ## Decision rule (read first)
 
-    Dan asks a question about a past meeting and you don't have the content —
-    e.g. "what did Tomas and I agree on in the data-pipelines 1:1",
-    "summarize last Friday's sprint wrap-up", "who owns the Jira release
-    date". Reach for this BEFORE replying "I don't have that meeting".
+    If Dan asks anything about a past meeting — summarize, reframe, who
+    said, what was agreed, action items, details — the answer is in this
+    skill, even if the meeting is on today's date and the daily-meeting-
+    summary cron already ran.
 
-    Do NOT use inside the daily-meeting-summary cron — step 1 of that skill
-    already aggregates the day's meetings.
+    **The daily digest ≠ the transcript.** The digest is a 5-bullet exec
+    summary saved to `/data/workspace/wiki/sources/meetings-YYYY-MM-DD.md`
+    and `/data/workspace/memory/meetings-exec-YYYY-MM-DD.md`. It is
+    lossy. The full transcript lives only in Speakr and must be fetched
+    via `speakr-cli.py get <id>`. If Dan wants reframing, details, or
+    verbatim content — you need the transcript, not the digest.
+
+    Do NOT reply "I don't have that meeting" or "the transcripts don't
+    exist in the workspace" before running at least one `search` query
+    against Speakr.
 
     ## Subcommands
 
