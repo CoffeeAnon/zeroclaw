@@ -7,7 +7,7 @@ data:
   daily-meeting-summary.md: |
     ---
     name: daily-meeting-summary
-    version: 4.4.0
+    version: 4.4.1
     description: >
       Cron-driven daily rollup of Dan's Speakr recordings into an exec
       summary, Vikunja tasks in project 1, a memory digest, and wiki
@@ -264,6 +264,22 @@ data:
             'is_highlighted','is_inbox','is_owner','is_shared','has_group_tags',
             'user_id','completed_at','created_at'}
 
+    # Self-documenting header for every digest file. Under Compact skill
+    # injection the speakr-lookup body isn't always loaded, so Sam can
+    # mistake this file for a transcript (2026-04-22: she served the
+    # digest when Dan asked for the "transcript"). The banner intercepts
+    # that shortcut at read time — the moment she file_reads this file,
+    # the first paragraph tells her it's a digest and points at the
+    # correct path for verbatim content.
+    DIGEST_BANNER = (
+        '> **This file is a digest, not a transcript.** Each meeting below '
+        'shows only a short summary. For verbatim content (what was actually '
+        'said, who said what, exact wording), use the `speakr-lookup` skill '
+        '— run `speakr-cli.py search` to find the meeting, then `get <id>` '
+        'to fetch the full transcript. Do not answer questions about meeting '
+        'content from this digest alone.\n\n'
+    )
+
     # Parse args
     dates_to_fetch = []
     lookback = 3
@@ -385,7 +401,11 @@ data:
 
         if not recs:
             if is_today:
-                content = f'# Meetings — {target_date}\n\nNo completed meeting recordings for today.\n'
+                content = (
+                    f'# Meetings — {target_date}\n\n'
+                    f'{DIGEST_BANNER}'
+                    'No completed meeting recordings for today.\n'
+                )
                 wiki_out.write_text(content)
                 mem_out.write_text(content)
             return {
@@ -398,7 +418,7 @@ data:
         pending_summaries = 0
         garbage_count = 0
         new_since_last = []
-        lines = [f'# Meetings — {target_date}\n\n']
+        lines = [f'# Meetings — {target_date}\n\n', DIGEST_BANNER]
 
         for idx, rec_stub in enumerate(recs):
             rid = rec_stub['id']
