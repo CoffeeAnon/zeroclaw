@@ -4,11 +4,18 @@ metadata:
   name: zeroclaw-a2a
   namespace: ai-agents
 spec:
-  instances: 2
+  instances: 3
   imageName: ghcr.io/cloudnative-pg/postgresql:16.4
   storage:
     size: 5Gi
     storageClass: rook-ceph-block
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      enabled: true
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: rook-ceph-object-store
+        serverName: zeroclaw-a2a
   bootstrap:
     initdb:
       database: a2a

@@ -72,3 +72,15 @@ spec:
         - ports:
             - port: "15008"
               protocol: TCP
+    # Rook RGW object store — barman-cloud plugin archives WAL + base
+    # backups to s3://cnpg-a2a-backups/ on this endpoint. Port is the pod
+    # targetPort (8080), not the Service port (80): Cilium evaluates
+    # egress after DNAT against the backend pod.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: rook-ceph
+            app: rook-ceph-rgw
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP

@@ -1,0 +1,59 @@
+---
+# Own RGW bucket for zeroclaw-a2a backups. Separate from the `cnpg-backups`
+# bucket that prod/dev/test-green share, so agent-side churn can't compete
+# for retention slots with the main DB backups. Rook's OBC provisioner
+# creates the bucket in RGW and a sibling Secret of the same name holding
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: cnpg-a2a-backups
+  namespace: ai-agents
+spec:
+  bucketName: cnpg-a2a-backups
+  storageClassName: rook-ceph-bucket
+---
+# Barman-cloud plugin binding to the above bucket. Mirrors the shape of
+# postgres/rook-ceph-object-store (compression + wal parallelism tuned for
+# the prod DB); a2a is small enough that these settings are fine as-is.
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: rook-ceph-object-store
+  namespace: ai-agents
+spec:
+  configuration:
+    destinationPath: s3://cnpg-a2a-backups/
+    endpointURL: http://rook-ceph-rgw-ceph-object-store.rook-ceph.svc.cluster.local:80
+    s3Credentials:
+      accessKeyId:
+        key: AWS_ACCESS_KEY_ID
+        name: cnpg-a2a-backups
+      secretAccessKey:
+        key: AWS_SECRET_ACCESS_KEY
+        name: cnpg-a2a-backups
+    data:
+      compression: gzip
+      immediateCheckpoint: false
+      jobs: 2
+    wal:
+      compression: gzip
+      maxParallel: 8
+  retentionPolicy: 30d
+---
+# Matches the prod-green cadence (every 6h at top of hour). The a2a DB is
+# small; the base backup is mostly WAL-metadata plus a few MB of outbox
+# rows, so the cost is negligible.
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: zeroclaw-a2a-backup
+  namespace: ai-agents
+spec:
+  cluster:
+    name: zeroclaw-a2a
+  schedule: 0 0 */6 * * *
+  backupOwnerReference: self
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
