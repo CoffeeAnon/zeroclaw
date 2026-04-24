@@ -9,6 +9,16 @@ spec:
   storage:
     size: 5Gi
     storageClass: rook-ceph-block
+  postgresql:
+    parameters:
+      # Cap per-replication-slot WAL retention. Without this, an offline replica's
+      # slot can pin unbounded WAL until the disk fills (see 2026-04-24
+      # prod-green-replication-slot-disk-fill incident — same family as this
+      # cluster's 2026-04-23 + 2026-04-24 pg_rewind crashloops where stale slots
+      # held WAL beyond what pg_rewind could find a common ancestor for). At
+      # 4 GB the slot will fail before the disk does, forcing a re-base of the
+      # stalled replica instead of taking down the cluster.
+      max_slot_wal_keep_size: "4GB"
   plugins:
     - name: barman-cloud.cloudnative-pg.io
       enabled: true
