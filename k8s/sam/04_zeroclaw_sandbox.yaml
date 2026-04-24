@@ -126,6 +126,16 @@ spec:
           env:
             - name: HOME
               value: /data
+            - name: TZ
+              # Align container wall clock with Dan's/Sam's local TZ so
+              # `datetime.date.today()` in skill Python scripts (speakr-fetch.py,
+              # speakr-cli.py) produces Vancouver dates instead of UTC dates.
+              # Container was previously UTC, which caused Sam's late-afternoon
+              # queries for "today's meetings" to fetch the wrong calendar date
+              # once UTC crossed midnight. See scrapyard-wiki/incidents/
+              # 2026-04-23-speakr-sam-timezone-mismatch. Cron schedules are
+              # unaffected — they already carry `tz` explicitly.
+              value: America/Vancouver
             - name: API_KEY
               valueFrom:
                 secretKeyRef:
