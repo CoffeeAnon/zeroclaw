@@ -10,30 +10,47 @@ data:
   task-tracking.md: |
     ---
     name: task-tracking
-    version: 1.3.0
+    version: 1.4.0
     description: >
-      Durable task tracking in Vikunja (Sam's inbox, project #3).
-      Always resident — consult the body on every inbound Signal
-      message to decide whether to open a task BEFORE doing work.
+      Durable task tracking in Vikunja. Sam's inbox (project #3) for
+      work Sam can produce end-to-end; Dan's inbox (project #1) for
+      asks needing Dan's tools/time, or that Dan routed to his list
+      explicitly. Always resident — consult on every inbound Signal
+      message before doing work.
     always: true
     ---
 
     # Task Tracking
 
-    Durable work state lives in Vikunja project #3 (Sam's inbox).
-    Use it INSTEAD OF `memory_store` for anything Dan asks you to
-    do. `memory_store` has no lifecycle — a resolved instruction
-    there keeps scoring high on relevance and surfacing as a
-    phantom pending task (see 2026-04-16 isolation-leak incident).
-    Vikunja tasks have `done: true|false`, timestamps, and are
+    Durable task state lives in Vikunja, never in `memory_store`.
+    `memory_store` has no lifecycle — a resolved instruction there
+    keeps scoring high on relevance and surfacing as a phantom
+    pending task (see 2026-04-16 isolation-leak incident). Vikunja
+    tasks have `done: true|false`, timestamps, and are
     Dan-inspectable, so resolved work looks resolved.
+
+    Two projects matter:
+
+    - **#3 (Sam's inbox)** — work Sam owns end-to-end and will
+      deliver to Dan via reply.
+    - **#1 (Dan's inbox)** — asks that need Dan to act, or that
+      Dan routed to his own list.
+
+    A task in the wrong project is worse than no task: Dan has to
+    clean it up, and items routed to Sam's inbox that she can't
+    actually close just sit there.
 
     ## First decision on every inbound Signal message
 
-    Ask: **is this a task?** (Dan asking you to produce something,
-    even if you deliver the result by reply.)
+    Two questions, in order. Q1 decides whether to track at all;
+    Q2 decides where.
 
-    **YES** → `vikunja my-task create ...` BEFORE doing any work:
+    ### Q1 — Is this a task?
+
+    A "task" = Dan asking you to produce or arrange something, even
+    if the deliverable is just your reply.
+
+    **YES** → continue to Q2:
 
     - Audits, investigations, reviews, summaries, reports
     - Imperatives with a concrete outcome ("please X", "rename Y",
@@ -53,8 +70,34 @@ data:
     - Status ping ("are you there?", "did X work?", "still running?")
     - Chat about yourself or tools
 
-    When in doubt, create the task. Over-tracking costs one CLI
-    call; under-tracking loses durable context.
+    When Q1 is in doubt, treat as YES and continue to Q2.
+
+    ### Q2 — Whose task is it?
+
+    **Sam's** → `vikunja my-task create "<title>" ...` (project 3).
+    Use when:
+
+    - You can produce the deliverable end-to-end (audit, review,
+      summary, code/k8s op, wiki edit, report, lookup with analysis)
+    - Dan will get the result by reply, or you'll close out with a
+      comment on the task
+
+    **Dan's** → `vikunja task create 1 --title "<title>" ...`
+    (project 1). Use when ANY of these are true:
+
+    - The action needs a tool or access Sam doesn't have — booking
+      appointments, phone calls, signing things, paying, in-person
+      logistics, anything off-cluster
+    - Dan named the destination explicitly — "on my todo list",
+      "my task list", "put it on my list", "remind me to", "not
+      yours", "for me to do"
+    - Dan asked you to track for him, not do for him — "I should…
+      remind me", "don't let me forget", "queue this up for me"
+
+    If Sam's-vs-Dan's is ambiguous (could go either way), ask in
+    the reply rather than guessing — one clarifying question is
+    cheaper than a misroute and a cleanup. Default to Dan's-task
+    only when there's at least one concrete signal above.
 
     ## When this skill does NOT apply
 
@@ -83,7 +126,7 @@ data:
     else — a task in the wrong project is worse than no task,
     because Dan then has to clean up.
 
-    ## Workflow
+    ## Workflow — Sam's task (project 3)
 
     **Step 1 — Create BEFORE doing the work:**
 
@@ -108,6 +151,20 @@ data:
 
     Two CLI calls per task. Keep the comment short — Dan opens
     Vikunja for detail, not his chat replies.
+
+    ## Workflow — Dan's task (project 1)
+
+    Sam doesn't do the work and doesn't close the task — Dan does.
+    One CLI call, then reply confirming what landed where.
+
+    ```
+    vikunja task create 1 --title "<short title>" \
+      --description "<Dan's ask verbatim + any relevant context>" \
+      [--due YYYY-MM-DD] [--priority 1-5]
+    ```
+
+    Reply: *"Added to your todo list (#N): <title>."* Don't promise
+    to follow up — it's Dan's now.
 
     ## Worked example
 
@@ -150,6 +207,8 @@ data:
 
     ## CLI reference
 
+    Sam's inbox (project 3 — baked in via `VIKUNJA_SAM_PROJECT_ID`):
+
     ```
     vikunja my-tasks [--open] [--format text|json]
     vikunja my-task create "<title>" [--description ...] [--priority 1-5] [--due YYYY-MM-DD]
@@ -158,8 +217,16 @@ data:
     vikunja my-task note   <id> "<progress>"
     ```
 
-    Project ID is baked in via `VIKUNJA_SAM_PROJECT_ID`; the `my-*`
-    commands never need you to pass it.
+    Dan's inbox (project 1 — pass project-id explicitly):
+
+    ```
+    vikunja task create 1 --title "<title>" [--description ...] [--due YYYY-MM-DD] [--priority 1-5]
+    vikunja tasks 1 [--sort position|priority|due] [--format text|json]
+    ```
+
+    Sam does not close tasks in project 1 on Dan's behalf. If Dan
+    asks Sam to mark something done there, Sam can — but the
+    default is hands-off.
 
     ## Failure modes
 
