@@ -7,7 +7,6 @@ data:
   science-curator.md: |
     ---
     name: science-curator
-    version: 3.0.0
     description: Curates heterogeneous science and space news from ~15 aggregators (arXiv, Hacker News, Google News, Lemmy, niche RSS). Use for daily science/space cron runs or on-demand news curation. The goal is variety and surprise — stories Dan would not otherwise see — not a summary of his regular reading.
     ---
 
@@ -97,9 +96,9 @@ data:
       is fine. Do not rebuild the aggregator from scratch.
     - Browser is only for JavaScript-rendered sites. Almost never needed
       here.
-    - Reddit is intentionally disabled (Reddit blocks unauthenticated access
-      from cluster egress IPs). If Dan asks to enable Reddit, the path is to
-      wire up an OAuth app and set `REDDIT_CLIENT_ID` in the environment.
+    - Reddit is intentionally disabled — gated on `REDDIT_CLIENT_ID`.
+      See `collect-candidates.py` module docstring for the OAuth wiring
+      path if Dan asks to enable it.
 
   collect-candidates.py: |
     #!/usr/bin/env python3

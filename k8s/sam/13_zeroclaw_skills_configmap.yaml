@@ -7,8 +7,12 @@ data:
   k8s-delegation.md: |
     ---
     name: k8s-delegation
-    version: 2.0.0
-    description: Delegate K8s tasks to Walter via ACP. Use for any cluster work.
+    description: >
+      Delegate K8s work to Walter (the cluster-side agent) via ACP. Use for
+      deploys, manifest edits, scrapyard-applications PRs, follow-ups on
+      Walter's PRs, and any multi-step cluster change. Skip for read-only
+      observation Sam can answer alone, or for repo work that doesn't touch
+      the cluster.
     always: false
     ---
 
@@ -64,7 +68,6 @@ data:
   vikunja-project-manager.md: |
     ---
     name: vikunja-project-manager
-    version: 2.1.0
     description: Manage project status, tasks, priorities, labels, and ordering via the vikunja CLI. Use this whenever Dan mentions todo lists, task tracking, project status, prioritizing, reordering, removing duplicates, backlogs, roadmaps, what's on his plate, what to work on next, or wants to record or report progress on work items — even if he doesn't explicitly name Vikunja.
     ---
 
@@ -74,13 +77,14 @@ data:
     ordering on the team's Vikunja instance (todolist.coffee-anon.com). Use it
     to track work status, create actionable task lists, and report progress.
 
-    ## When to use this
+    ## Not for this
 
-    - Dan asks about project status or what's being worked on
-    - Dan asks you to prioritize, reorder, or clean up a list
-    - Dan asks you to remove duplicates from a project
-    - You complete work and want to record it
-    - You need to check what's outstanding before starting work
+    - **Sam's own task tracking** — use `task-tracking` (project #3 via
+      `vikunja my-task ...`). This skill is for general project work,
+      not Sam's inbox.
+    - **Meeting action items** — `daily-meeting-summary` step 3 owns
+      the batch-create flow into project #1.
+    - **GitHub issues / PRs** — different system entirely; use `gh`.
 
     ## Discovering usage
 
@@ -182,7 +186,6 @@ data:
 
     ## Style
 
-    - `--priority` is 1 (lowest) through 5 (highest).
     - `task show` is your detail view — use it whenever a list line isn't enough.
     - `--format json` is the right tool for programmatic reasoning; the
       default text format is for quick human-facing status reports.

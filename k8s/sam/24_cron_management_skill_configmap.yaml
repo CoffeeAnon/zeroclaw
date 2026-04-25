@@ -7,8 +7,13 @@ data:
   cron-management.md: |
     ---
     name: cron-management
-    version: 2.0.0
-    description: Guides creation, modification, and review of cron jobs. Consult before cron_add or cron_update.
+    description: >
+      Creation, modification, and review of agent cron jobs. Use before
+      `cron_add` or `cron_update`, when reviewing existing crons for
+      hygiene, when Dan asks about scheduled tasks, or whenever the words
+      "every", "daily", "periodic", "recurring", or "check on this
+      regularly" come up. Covers frequency choice, exit conditions, the
+      `cron_run` infinite-loop trap, and shared-GPU slot budget.
     always: false
     ---
 
@@ -36,7 +41,19 @@ data:
     - Include an explicit exit condition: "If nothing to report: end immediately. Do not save memory, do not message Dan."
     - Use live tools (vikunja CLI, acp-client, shell), not just memory_recall. Memory is a cache that goes stale.
     - Constrain scope. Specify exactly what to check and what to do. Vague prompts cause runaway sessions.
-    - Include "Do not call cron_run — you are already inside the cron job." in every agent prompt.
+
+    ### Always include the cron_run guard
+
+    Every agent cron prompt MUST contain this exact line:
+
+    ```
+    Do not call cron_run — you are already inside the cron job.
+    ```
+
+    Without it, the model may call `cron_run`, which spawns another
+    session running the same prompt, which calls `cron_run` again —
+    forever. If you suspect a loop, `cron_remove <job_id>` first, then
+    redesign before recreating.
 
     ## cron_add Parameters
 

@@ -10,7 +10,6 @@ data:
   speakr-lookup.md: |
     ---
     name: speakr-lookup
-    version: 1.2.0
     description: >
       Fetch full meeting transcripts from Speakr on demand. Load this skill
       whenever Dan asks about what was said, discussed, agreed, or decided
@@ -29,27 +28,17 @@ data:
 
     ## Which skill for which question
 
-    Two meeting-related skills exist and they don't overlap:
+    `daily-meeting-summary` owns the cron-shaped path; this skill owns
+    every ad-hoc question — verbatim content, reframing, who-said-what,
+    details beyond the 5-bullet digest. See `daily-meeting-summary` for
+    the canonical boundary statement.
 
-    - **`daily-meeting-summary`** — owns the cron that produces the daily
-      exec summary, Vikunja tasks, memory digest, and wiki pages. That's
-      the only surface it owns.
-    - **`speakr-lookup`** (this one) — owns every ad-hoc question Dan
-      asks about a past meeting: verbatim content, reframing, who-said-
-      what, details beyond the 5-bullet digest.
+    **The daily digest ≠ the transcript.** Digest is lossy (5 bullets);
+    transcript is verbatim and lives only in Speakr. When Dan wants
+    details, reach for `speakr-cli.py get`.
 
-    If Dan says "summarize today's meetings" as a generic ask, the exec
-    summary in `/data/workspace/memory/meetings-exec-YYYY-MM-DD.md` is
-    enough. If he asks about a specific meeting — by title, participant,
-    topic, or "can you reframe/expand/clarify" — you need the transcript.
-
-    **The daily digest ≠ the transcript.** The digest is lossy; it's
-    5 bullets per meeting. The transcript is verbatim and lives only in
-    Speakr. When Dan wants details, reach for `speakr-cli.py get`.
-
-    Do NOT reply "I don't have that meeting" or "the transcripts don't
-    exist in the workspace" before running at least one `search` query
-    against Speakr.
+    Do NOT reply "I don't have that meeting" before running at least one
+    `search` query against Speakr.
 
     ## Subcommands
 

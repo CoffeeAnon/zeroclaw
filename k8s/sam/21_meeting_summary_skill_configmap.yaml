@@ -7,7 +7,6 @@ data:
   daily-meeting-summary.md: |
     ---
     name: daily-meeting-summary
-    version: 4.4.1
     description: >
       Cron-driven daily rollup of Dan's Speakr recordings into an exec
       summary, Vikunja tasks in project 1, a memory digest, and wiki
@@ -162,35 +161,29 @@ data:
 
     #### Phase 3 — Batch create
 
-    Build one JSON array for the whole review (same-day + late-backfill
-    in one array). Each object sets:
+    Follow `vikunja-project-manager` for CLI mechanics. Meeting-specific
+    deltas:
 
-    - `title`: verb + noun, no provenance (provenance goes in description).
-    - `priority`: `4` if deadline ≤7 days, else `3`.
-    - `due`: `"YYYY-MM-DD"` when given; omit otherwise.
-    - `description`: `"From <meeting title>."` for same-day, or
-      `"(late backfill from YYYY-MM-DD) From <meeting title>."` for
-      backfill items. Flat string, no extra quoting — the CLI passes it
-      through JSON, not shell.
-    - `labels`: `["from-meeting"]` (CLI auto-creates the label).
+    - **Project is always `1` (Dan's inbox).** Same-day + late-backfill
+      go in one JSON array, written to
+      `/data/.zeroclaw/workspace/tasks-YYYY-MM-DD.json`.
+    - **Per-task fields**: `title` = verb + noun (no provenance);
+      `priority` = `4` if due ≤7 days else `3`; `due` = `"YYYY-MM-DD"`
+      when given, omit otherwise; `description` = `"From <meeting>."`
+      for same-day or `"(late backfill from YYYY-MM-DD) From <meeting>."`
+      for backfill; `labels` = `["from-meeting"]`.
+    - **Do not** pass `--assignee dan` — the token 401s on user lookups;
+      project ownership routes correctly without it.
+    - **Zero surviving candidates** → skip Phase 3 entirely (no empty
+      array, no tmp file).
+    - **Leave the tmp JSON in place** after the call — per-day record of
+      what Sam tried to create.
+    - **`F > 0` from batch-create** (exits 1 by design) → continue to
+      steps 4 and 5; surface failed titles to Dan in the final reply.
 
     ```
-    file_write /data/.zeroclaw/workspace/tasks-YYYY-MM-DD.json
     shell: vikunja task batch-create 1 --file /data/.zeroclaw/workspace/tasks-YYYY-MM-DD.json
     ```
-
-    Do **not** pass `--assignee dan` — the token 401s on user lookups;
-    tasks land in Dan's inbox correctly via project ownership.
-
-    Zero surviving candidates after phase 2 → skip phase 3 entirely.
-    Don't batch-create an empty array and don't write the tmp file.
-
-    Leave `tasks-YYYY-MM-DD.json` in place after the call — it's a
-    per-day record of what Sam tried to create.
-
-    If batch-create reports `F > 0` (it exits 1 by design), continue to
-    step 4 and step 5 anyway, and surface the failed titles to Dan in
-    your final reply.
 
     ### Step 4 — Memory digest
 
@@ -264,13 +257,8 @@ data:
             'is_highlighted','is_inbox','is_owner','is_shared','has_group_tags',
             'user_id','completed_at','created_at'}
 
-    # Self-documenting header for every digest file. Under Compact skill
-    # injection the speakr-lookup body isn't always loaded, so Sam can
-    # mistake this file for a transcript (2026-04-22: she served the
-    # digest when Dan asked for the "transcript"). The banner intercepts
-    # that shortcut at read time — the moment she file_reads this file,
-    # the first paragraph tells her it's a digest and points at the
-    # correct path for verbatim content.
+    # Self-documenting header prepended to every digest file so a
+    # file_read on this path can't be mistaken for a transcript.
     DIGEST_BANNER = (
         '> **This file is a digest, not a transcript.** Each meeting below '
         'shows only a short summary. For verbatim content (what was actually '
