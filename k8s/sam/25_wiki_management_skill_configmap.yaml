@@ -7,7 +7,6 @@ data:
   wiki-management.md: |
     ---
     name: wiki-management
-    version: 2.2.0
     description: >
       Maintain a structured markdown wiki as your primary knowledge store.
       Use whenever you learn something worth keeping, ingest a document or
@@ -64,8 +63,9 @@ data:
     ```
 
     Then check `index.md` and `log.md`. If either is **missing or
-    0 bytes** (known pre-v2.0 state), seed with the templates in the
-    design doc before doing any other wiki operation.
+    0 bytes** (known pre-v2.0 state), seed from the *Bootstrap
+    templates* section of `docs/sam-skills/wiki-management-design.md`
+    before any other wiki operation.
 
     ## Operations
 

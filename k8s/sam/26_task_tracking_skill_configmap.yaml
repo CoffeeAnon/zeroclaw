@@ -10,7 +10,6 @@ data:
   task-tracking.md: |
     ---
     name: task-tracking
-    version: 1.4.0
     description: >
       Durable task tracking in Vikunja. Sam's inbox (project #3) for
       work Sam can produce end-to-end; Dan's inbox (project #1) for
@@ -173,19 +172,13 @@ data:
     ```
     $ vikunja my-task create "Audit crons for delivery gaps" \
         --description "Check every cron's delivery.mode and channel/to config"
-    Task #42 created: Audit crons for delivery gaps
-
-    # ... run cron_list, inspect each, summarize ...
-
-    $ vikunja my-task done 42 \
-        --comment "Found 3 with mode=none: speakr-daily-summary, wiki-lint, self-reflection-check. Two correctly configured: science-curator, vikunja-task-review."
+    Task #42 created
+    # ... do the audit ...
+    $ vikunja my-task done 42 --comment "<findings>"
     Task #42 updated [DONE]
     ```
 
-    Reply to Dan: *"Audited your crons (tracked as #42). Three
-    have mode=none: speakr-daily-summary, wiki-lint, and
-    self-reflection-check. Two are correctly configured with
-    Signal delivery. Want me to wire delivery on any of them?"*
+    Then reply to Dan with the findings and reference the task ID.
 
     ## Session start
 

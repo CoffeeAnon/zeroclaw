@@ -7,8 +7,13 @@ data:
   browser-navigation.md: |
     ---
     name: browser-navigation
-    version: 2.0.0
-    description: Guides browser tool usage. Consult before calling the browser tool.
+    description: >
+      Headless-Chromium navigation patterns: snapshot vs screenshot, ref
+      targeting, recovery from empty/stale snapshots, and form/SPA flows.
+      Use before fetching a JavaScript-rendered page, clicking a UI,
+      filling a form, or recovering from an empty snapshot. Skip for JSON
+      APIs, REST endpoints, and file downloads — Python urllib via shell
+      is faster and cheaper.
     always: false
     ---
 
