@@ -72,6 +72,20 @@ pub(crate) async fn notify_cron_failure(config: &Config, job: &CronJob, output: 
             job.id,
             channel
         );
+        return;
+    }
+    if let Err(e) = crate::cron::outbound_log::record(
+        &config.workspace_dir,
+        &job.id,
+        job.name.as_deref(),
+        channel,
+        target,
+        &message,
+    ) {
+        tracing::warn!(
+            "Failed to record cron outbound (failure notification) for job '{}': {e}",
+            job.id
+        );
     }
 }
 
@@ -416,7 +430,21 @@ async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> 
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("delivery.to is required for announce mode"))?;
 
-    deliver_announcement(config, channel, target, output).await
+    deliver_announcement(config, channel, target, output).await?;
+    if let Err(e) = crate::cron::outbound_log::record(
+        &config.workspace_dir,
+        &job.id,
+        job.name.as_deref(),
+        channel,
+        target,
+        output,
+    ) {
+        tracing::warn!(
+            "Failed to record cron outbound for job '{}': {e}",
+            job.id
+        );
+    }
+    Ok(())
 }
 
 pub(crate) async fn deliver_announcement(

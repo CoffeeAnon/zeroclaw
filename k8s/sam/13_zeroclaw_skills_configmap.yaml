@@ -86,6 +86,11 @@ data:
       the batch-create flow into project #1.
     - **GitHub issues / PRs** — different system entirely; use `gh`.
 
+    When `task-tracking` Q0 fires on an inbound reply (state
+    update on an existing task), the CLI it reaches for —
+    `vikunja task comment` and `vikunja task update` — is
+    documented below in the Command reference and Gotchas.
+
     ## Discovering usage
 
     Every command supports `--help`. When you are unsure, run it:

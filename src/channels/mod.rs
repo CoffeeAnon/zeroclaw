@@ -137,6 +137,9 @@ const MODEL_CACHE_PREVIEW_LIMIT: usize = 10;
 const MEMORY_CONTEXT_MAX_ENTRIES: usize = 4;
 const MEMORY_CONTEXT_ENTRY_MAX_CHARS: usize = 800;
 const MEMORY_CONTEXT_MAX_CHARS: usize = 4_000;
+const CRON_OUTBOUND_LOOKBACK_HOURS: i64 = 24;
+const CRON_OUTBOUND_MAX_ENTRIES: usize = 8;
+const CRON_OUTBOUND_ENTRY_MAX_CHARS: usize = 800;
 const CHANNEL_HISTORY_COMPACT_KEEP_MESSAGES: usize = 12;
 const CHANNEL_HISTORY_COMPACT_CONTENT_CHARS: usize = 600;
 const CHANNEL_CONTEXT_TOKEN_ESTIMATE_LIMIT: usize = 90_000;
@@ -3131,6 +3134,60 @@ async fn build_memory_context(
     context
 }
 
+/// Surface recent cron-announce outbounds so the agent sees what it
+/// already said via scheduled tasks even though those turns aren't in
+/// the conversation history. Without this, when the user replies to a
+/// cron-pushed message the agent has no record of having spoken first
+/// — see incidents/2026-04-23-sam-announce-cron-signal-hallucination
+/// and the 2026-04-27 follow-up where the same dual-path shape bit the
+/// other direction.
+fn build_cron_outbound_context(
+    workspace_dir: &std::path::Path,
+    channel: &str,
+    recipient: &str,
+) -> String {
+    let since = Utc::now() - chrono::Duration::hours(CRON_OUTBOUND_LOOKBACK_HOURS);
+    let entries = match crate::cron::outbound_log::recent_for_recipient(
+        workspace_dir,
+        channel,
+        recipient,
+        since,
+        CRON_OUTBOUND_MAX_ENTRIES,
+    ) {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => return String::new(),
+        Err(e) => {
+            tracing::debug!("cron_outbound lookup failed: {e}");
+            return String::new();
+        }
+    };
+
+    let mut out = String::from(
+        "[Recent scheduled-task messages you (the agent) sent in the last 24h. \
+         These are not in the conversation history, but the user may be replying \
+         to one of them. Use only what's relevant; ignore the rest.]\n",
+    );
+    for e in entries {
+        let when = e
+            .sent_at
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M %Z");
+        let label = e
+            .job_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&e.job_id);
+        let body: String = e.body.chars().take(CRON_OUTBOUND_ENTRY_MAX_CHARS).collect();
+        let truncated = if e.body.chars().count() > CRON_OUTBOUND_ENTRY_MAX_CHARS {
+            "…"
+        } else {
+            ""
+        };
+        out.push_str(&format!("- {when} via cron \"{label}\":\n{body}{truncated}\n\n"));
+    }
+    out
+}
+
 /// Format a memory timestamp as a human-readable relative age string.
 fn format_memory_age(timestamp: &str) -> String {
     let parsed: Option<DateTime<FixedOffset>> = DateTime::parse_from_rfc3339(timestamp).ok();
@@ -3846,6 +3903,18 @@ or tune thresholds in config.",
             );
             if !queue_context.is_empty() {
                 last_turn.content = format!("{queue_context}{}", last_turn.content);
+            }
+
+            // Inject recent cron-announce outbounds so the agent sees what
+            // it already said via scheduled tasks even when those turns
+            // aren't in the conversation history.
+            let cron_context = build_cron_outbound_context(
+                ctx.workspace_dir.as_ref(),
+                &msg.channel,
+                &msg.sender,
+            );
+            if !cron_context.is_empty() {
+                last_turn.content = format!("{cron_context}{}", last_turn.content);
             }
         }
     }

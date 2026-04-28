@@ -8,6 +8,7 @@ mod store;
 mod types;
 
 pub mod active_jobs;
+pub mod outbound_log;
 pub mod scheduler;
 
 #[allow(unused_imports)]

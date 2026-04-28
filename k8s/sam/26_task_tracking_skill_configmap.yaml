@@ -41,8 +41,62 @@ data:
 
     ## First decision on every inbound Signal message
 
-    Two questions, in order. Q1 decides whether to track at all;
-    Q2 decides where.
+    Three questions, in order. Q0 catches updates to existing
+    tasks; Q1 decides whether to track at all; Q2 decides where.
+
+    ### Q0 — Does this message update an existing task?
+
+    Run this before Q1 on every inbound — not just at session
+    start. Dan often replies to a cron-pushed nudge with
+    state-change info hours after Sam sent it; without this
+    check, the existing task sits stale and Sam treats Dan's
+    reply as a fresh topic (see 2026-04-27 strata-reply gap).
+
+    **Triggers — investigate Q0 if any are true:**
+
+    - The recent scheduled-task messages context block at the
+      top of this turn shows a cron nudge about a task
+      (roofing call, vikunja-task-review, science-curator,
+      etc.) and Dan's reply reads like a status update on it.
+    - Dan names a topic that's likely tracked (a person
+      handling something, a vendor, a deadline, an open
+      initiative). Search before assuming:
+
+      ```
+      vikunja tasks 1 --format json | jq '.[] | select(.done==false and (.title | test("<keyword>";"i")))'
+      vikunja my-tasks --open
+      ```
+
+    - The message contains state-change phrasing about
+      something tracked: "we agreed", "X is handling it",
+      "decided", "scheduled for", "moved to <date>", "no
+      longer needed", "done", "paid", "signed".
+
+    **If yes — update the task before replying:**
+
+    - New context, no status flip → comment.
+      ```
+      vikunja task comment <id> --body "<verbatim or paraphrased update>"
+      ```
+    - Status flipped (resolved, cancelled, deferred) → update.
+      Mind the "task update zeroes fields you don't pass"
+      gotcha in `vikunja-project-manager` — `task show <id>`
+      first.
+      ```
+      vikunja task show   <id>
+      vikunja task update <id> --done            # closed
+      vikunja task update <id> --due YYYY-MM-DD --priority N   # rescheduled
+      ```
+    - Owner changed (someone else is handling it) → comment
+      naming the new owner; don't reassign in Vikunja unless
+      Dan explicitly asks.
+
+    Then continue to Q1. One reply can both update an existing
+    task AND create a new one (e.g., "Cathy has the roof; also
+    add 'send her the contractor list' to my list"). Don't skip
+    Q1 just because Q0 fired.
+
+    **If no →** continue to Q1.
 
     ### Q1 — Is this a task?
 
@@ -182,15 +236,9 @@ data:
 
     ## Session start
 
-    Before responding to the first message of a new session:
-
-    ```
-    vikunja my-tasks --open
-    ```
-
-    If items are open: check whether the current message relates
-    to an existing one (update, don't duplicate). Nudge Dan about
-    anything stuck.
+    Q0 above is the always-on update-vs-create gate. Optional at
+    the start of a fresh session: `vikunja my-tasks --open` to
+    surface stuck items Dan might want a nudge on.
 
     ## Long-running tasks
 

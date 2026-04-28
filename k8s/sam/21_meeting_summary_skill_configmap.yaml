@@ -116,6 +116,12 @@ data:
     `vikunja-project-manager` skill has the full CLI reference if you
     need it; this step only specifies meeting-specific pieces.
 
+    Tasks created here are write-once from this cron. Inbound updates
+    on these tasks (Dan replying with state info on a meeting-derived
+    item, or to a cron-pushed nudge about one) route through
+    `task-tracking` Q0 — not back through this skill. Don't try to
+    catch reply-driven updates inside the cron flow.
+
     #### Phase 1 — Gather candidates
 
     Take **only** the bullets immediately under the `## Action items for
