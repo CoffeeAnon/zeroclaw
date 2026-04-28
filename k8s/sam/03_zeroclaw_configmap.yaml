@@ -89,8 +89,16 @@ data:
 
       [agent]
       max_tool_iterations = 999
-      loop_detection_no_progress_threshold = 15
+      loop_detection_no_progress_threshold = 3
       loop_detection_failure_streak = 10
+      # Tool-loop and interactive safety heartbeats inject a user-role
+      # constraint reminder that prompts Sam to re-read the original task
+      # instructions and re-call send_user_message — observed as 4–8 duplicate
+      # Signal messages per cron run on 2026-04-25 / 2026-04-26. Sam already
+      # has Signal + cron as liveness signals; the inner heartbeat is just
+      # noise (mirrors the [heartbeat] block below, which is also disabled).
+      safety_heartbeat_interval = 0
+      safety_heartbeat_turn_interval = 0
 
       [heartbeat]
       # Disabled 2026-04-17: heartbeat injects a user-role message mid-turn
