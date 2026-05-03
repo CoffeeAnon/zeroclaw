@@ -22,10 +22,26 @@ run since, classifies the in-flight session into one of:
   completed             — already recorded a run after this fire window
   not-due               — next_run still in the future
 
+With `--recent-completed N`, ALSO checks every cron_runs entry from the
+last N hours for post-fire artifact health (Fix 1b — catches the case
+where status=ok but the intended side effect didn't happen):
+
+  verified-success      — status=ok with at least one wiki-tree file
+                          modified during the run window, OR a short
+                          duration where no wiki write was expected
+  silent-success        — status=ok, ran >60s, but no wiki-tree changes
+                          detected during the run window. Suspicious —
+                          this is the failure mode where Sam reasons
+                          her way through Step N but never persists the
+                          intended write (e.g. final assistant message
+                          is a thought without a tool call).
+  failed-run            — status=error
+
 Exit codes:
-  0  no stalls detected (responsive/completed/not-due/starting only)
+  0  no stalls detected (responsive/completed/not-due/starting/
+     verified-success only)
   2  one or more jobs in scheduler-error/llm-stalled/silent-suspect-crash/
-     verbose-reasoning/slow state
+     verbose-reasoning/slow/silent-success/failed-run state
   3  kubectl unreachable / pod inaccessible
   4  invalid args (e.g. --job names a cron that doesn't exist)
 """
@@ -47,6 +63,11 @@ RESPONSIVE_RECENT_S = 30
 SILENT_SUSPECT_CRASH_S = 300
 VERBOSE_MIN_TURNS = 5
 VERBOSE_WINDOW_S = 120
+
+# Fix 1b — post-fire artifact thresholds
+SILENT_SUCCESS_MIN_DURATION_S = 60      # below this, no-write is presumed legitimate
+WIKI_ROOT = "/data/workspace/wiki/"     # tree to check for post-fire modifications
+WIKI_PROBE_GRACE_S = 30                 # accept mtimes up to N seconds after finished_at
 
 # kubectl prefixes each log line with an RFC3339 timestamp, then a space, then
 # whatever the container wrote. Sam's own log lines often embed *another*
@@ -115,6 +136,81 @@ def fetch_jobs() -> List[Dict[str, Any]]:
         print(f"error: cron_jobs query failed: {stderr}", file=sys.stderr)
         sys.exit(3)
     return json.loads(stdout.strip()) if stdout.strip() else []
+
+
+def fetch_recent_runs(lookback_hours: int) -> List[Dict[str, Any]]:
+    """Return cron_runs entries from the last N hours, joined with job_name."""
+    code = (
+        "import sqlite3, json\n"
+        "c = sqlite3.connect('file:/data/.zeroclaw/workspace/cron/jobs.db?mode=ro', uri=True)\n"
+        "c.row_factory = sqlite3.Row\n"
+        f"q = ('SELECT r.job_id, r.started_at, r.finished_at, r.status, r.duration_ms, "
+        "j.name AS job_name FROM cron_runs r "
+        "JOIN cron_jobs j ON j.id = r.job_id "
+        f"WHERE datetime(r.started_at) >= datetime(\"now\", \"-{int(lookback_hours)} hours\") "
+        "ORDER BY r.started_at DESC')\n"
+        "out = [dict(r) for r in c.execute(q)]\n"
+        "print(json.dumps(out))\n"
+    )
+    rc, stdout, stderr = kubectl_exec_python(code)
+    if rc != 0:
+        print(f"error: cron_runs query failed: {stderr}", file=sys.stderr)
+        sys.exit(3)
+    return json.loads(stdout.strip()) if stdout.strip() else []
+
+
+def probe_wiki_changes(started_at: str, finished_at: str) -> List[str]:
+    """Enumerate files under WIKI_ROOT whose mtime falls within the run window
+    plus a small grace period after finished_at."""
+    started = parse_iso(started_at)
+    finished = parse_iso(finished_at)
+    if not started or not finished:
+        return []
+    start_ts = started.timestamp()
+    end_ts = finished.timestamp() + WIKI_PROBE_GRACE_S
+    code = (
+        "import os, json\n"
+        f"start_ts = {start_ts}\n"
+        f"end_ts = {end_ts}\n"
+        f"root = {WIKI_ROOT!r}\n"
+        "out = []\n"
+        "for d, _, files in os.walk(root):\n"
+        "    for f in files:\n"
+        "        p = os.path.join(d, f)\n"
+        "        try:\n"
+        "            m = os.path.getmtime(p)\n"
+        "            if start_ts <= m <= end_ts:\n"
+        "                out.append(p)\n"
+        "        except OSError:\n"
+        "            pass\n"
+        "print(json.dumps(out))\n"
+    )
+    rc, stdout, _ = kubectl_exec_python(code)
+    if rc != 0:
+        return []
+    try:
+        return json.loads(stdout.strip()) if stdout.strip() else []
+    except json.JSONDecodeError:
+        return []
+
+
+def diagnose_post_fire(run: Dict[str, Any], wiki_files: List[str]) -> Dict[str, Any]:
+    """Classify a completed cron_runs row using post-fire artifact evidence."""
+    duration_s = (run.get("duration_ms") or 0) / 1000.0
+    base = {
+        "duration_seconds": duration_s,
+        "wiki_modification_count": len(wiki_files),
+        "wiki_files_modified_during_run": wiki_files[:10],  # cap to avoid blob output
+    }
+    if run.get("status") == "error":
+        return {**base, "diagnosis": "failed-run"}
+    if wiki_files:
+        return {**base, "diagnosis": "verified-success"}
+    if duration_s < SILENT_SUCCESS_MIN_DURATION_S:
+        return {**base, "diagnosis": "verified-success",
+                "note": "short cron, no wiki write expected"}
+    return {**base, "diagnosis": "silent-success",
+            "note": "ran >60s with status=ok but no wiki-tree changes during run window — suspicious"}
 
 
 def parse_log_events(logs: str) -> List[Tuple[str, dt.datetime, str]]:
@@ -228,6 +324,8 @@ def diagnose(
 STALL_DIAGNOSES = {
     "scheduler-error", "llm-stalled", "silent-suspect-crash",
     "verbose-reasoning", "slow",
+    # Fix 1b additions — completed runs with suspicious or failed outcomes
+    "silent-success", "failed-run",
 }
 
 
@@ -241,6 +339,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="human-friendly text output instead of JSON")
     p.add_argument("--all", action="store_true",
                    help="include not-due and completed crons in output (default: stalls + responsive only)")
+    p.add_argument("--recent-completed", type=int, default=0, metavar="HOURS",
+                   help="also check cron_runs from the last HOURS for post-fire artifact health "
+                        "(Fix 1b — catches status=ok with no observable side effect). 0 disables. "
+                        "Typical: --recent-completed 1 right after a fire.")
     args = p.parse_args(argv)
 
     now = utcnow()
@@ -270,16 +372,37 @@ def main(argv: Optional[List[str]] = None) -> int:
         diagnosed = [d for d in diagnosed
                      if d["diagnosis"] not in ("not-due", "completed")]
 
+    # Fix 1b: post-fire artifact-assertion checks for recently-completed runs
+    post_fire = []
+    if args.recent_completed > 0:
+        runs = fetch_recent_runs(args.recent_completed)
+        if args.job:
+            runs = [r for r in runs if r["job_name"] == args.job]
+        for run in runs:
+            wiki_files = probe_wiki_changes(run["started_at"], run["finished_at"])
+            d = diagnose_post_fire(run, wiki_files)
+            d.update({
+                "name": run["job_name"],
+                "job_id": run["job_id"],
+                "started_at": run["started_at"],
+                "finished_at": run["finished_at"],
+                "status": run["status"],
+            })
+            post_fire.append(d)
+            if d["diagnosis"] in STALL_DIAGNOSES:
+                has_stall = True
+
     payload = {
         "version": 1,
         "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "log_window": args.since,
         "stall_diagnoses": sorted(STALL_DIAGNOSES),
         "jobs": diagnosed,
+        "post_fire_runs": post_fire,
     }
 
     if args.text:
-        if not diagnosed:
+        if not diagnosed and not post_fire:
             print("no in-flight or stalled crons; all healthy")
         for j in diagnosed:
             elapsed = j.get("elapsed_seconds")
@@ -292,6 +415,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             if j.get("reasoning_turns_observed") is not None:
                 print(f"    turns_in_window={j['reasoning_turns_observed']}"
                       + (f"  recent_2m={j['recent_turns_2m']}" if "recent_turns_2m" in j else ""))
+        if post_fire:
+            print()
+            print(f"--- post-fire artifact checks (last {args.recent_completed}h) ---")
+            for r in post_fire:
+                dur = r.get("duration_seconds", 0)
+                print(f"[{r['diagnosis']:<22}] {r['name']:<30} duration={dur:>6.0f}s "
+                      f"wiki_changes={r['wiki_modification_count']}")
+                if r.get("note"):
+                    print(f"    note: {r['note']}")
+                if r.get("wiki_files_modified_during_run"):
+                    for p in r["wiki_files_modified_during_run"]:
+                        print(f"    + {p}")
     else:
         print(json.dumps(payload, indent=2))
 
