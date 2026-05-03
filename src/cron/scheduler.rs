@@ -89,6 +89,66 @@ pub(crate) async fn notify_cron_failure(config: &Config, job: &CronJob, output: 
     }
 }
 
+/// Build the user-facing message body for a scheduler-internal error.
+/// These are bricker-class problems (DB write failures, reschedule failures)
+/// that don't surface as job failures because they happen *after* the job
+/// has already produced its result. Without notification, a stuck job can
+/// quietly re-fire on every poll cycle.
+pub(crate) fn format_scheduler_error_notification(job: &CronJob, op: &str, error: &str) -> String {
+    let label = job
+        .name
+        .as_deref()
+        .filter(|n| !n.is_empty())
+        .unwrap_or(&job.id);
+    let trimmed = error.trim();
+    let body = if trimmed.chars().count() > FAILURE_NOTIFICATION_BODY_LIMIT {
+        let prefix: String = trimmed
+            .chars()
+            .take(FAILURE_NOTIFICATION_BODY_LIMIT)
+            .collect();
+        format!("{prefix}…")
+    } else {
+        trimmed.to_string()
+    };
+    format!(
+        "🚨 Cron scheduler error: {label}\nJob: {}\nOp: {op}\n\n{body}",
+        job.id
+    )
+}
+
+/// Send a best-effort scheduler-error notification. Reuses the same operator
+/// channel as `notify_cron_failure`. No-op when the channel/target is unset.
+pub(crate) async fn notify_scheduler_error(config: &Config, job: &CronJob, op: &str, error: &str) {
+    let (Some(channel), Some(target)) = (
+        config.scheduler.failure_notify_channel.as_deref(),
+        config.scheduler.failure_notify_to.as_deref(),
+    ) else {
+        return;
+    };
+    let message = format_scheduler_error_notification(job, op, error);
+    if let Err(e) = deliver_announcement(config, channel, target, &message).await {
+        tracing::warn!(
+            "Cron scheduler-error notification delivery failed for job '{}' via {}: {e}",
+            job.id,
+            channel
+        );
+        return;
+    }
+    if let Err(e) = crate::cron::outbound_log::record(
+        &config.workspace_dir,
+        &job.id,
+        job.name.as_deref(),
+        channel,
+        target,
+        &message,
+    ) {
+        tracing::warn!(
+            "Failed to record cron outbound (scheduler-error notification) for job '{}': {e}",
+            job.id
+        );
+    }
+}
+
 pub async fn run(config: Config) -> Result<()> {
     let poll_secs = config.reliability.scheduler_poll_secs.max(MIN_POLL_SECONDS);
     let mut interval = time::interval(Duration::from_secs(poll_secs));
@@ -339,7 +399,7 @@ async fn persist_job_result(
         }
     }
 
-    let _ = record_run(
+    if let Err(e) = record_run(
         config,
         &job.id,
         started_at,
@@ -347,7 +407,10 @@ async fn persist_job_result(
         if success { "ok" } else { "error" },
         Some(output),
         duration_ms,
-    );
+    ) {
+        tracing::warn!("Failed to record cron run for job '{}': {e}", job.id);
+        notify_scheduler_error(config, job, "record_run", &e.to_string()).await;
+    }
 
     if is_one_shot_auto_delete(job) {
         if success {
@@ -355,7 +418,13 @@ async fn persist_job_result(
                 tracing::warn!("Failed to remove one-shot cron job after success: {e}");
             }
         } else {
-            let _ = record_last_run(config, &job.id, finished_at, false, output);
+            if let Err(e) = record_last_run(config, &job.id, finished_at, false, output) {
+                tracing::warn!(
+                    "Failed to record last run for failed one-shot job '{}': {e}",
+                    job.id
+                );
+                notify_scheduler_error(config, job, "record_last_run", &e.to_string()).await;
+            }
             if let Err(e) = update_job(
                 config,
                 &job.id,
@@ -372,6 +441,7 @@ async fn persist_job_result(
 
     if let Err(e) = reschedule_after_run(config, job, success, output) {
         tracing::warn!("Failed to persist scheduler run result: {e}");
+        notify_scheduler_error(config, job, "reschedule_after_run", &e.to_string()).await;
     }
 
     success
@@ -1444,6 +1514,52 @@ mod tests {
             msg.contains('…') || msg.ends_with("..."),
             "should mark truncation: {msg}"
         );
+    }
+
+    #[test]
+    fn format_scheduler_error_notification_includes_op_and_id() {
+        let mut job = test_job("");
+        job.id = "abc123".into();
+        job.name = Some("Skill Curator".into());
+        let msg = format_scheduler_error_notification(
+            &job,
+            "reschedule_after_run",
+            "no value found for variable",
+        );
+        assert!(msg.contains("Skill Curator"), "missing name: {msg}");
+        assert!(msg.contains("abc123"), "missing id: {msg}");
+        assert!(
+            msg.contains("reschedule_after_run"),
+            "missing op label: {msg}"
+        );
+        assert!(msg.contains("no value found"), "missing error body: {msg}");
+        assert!(msg.contains("scheduler error"), "missing prefix: {msg}");
+    }
+
+    #[test]
+    fn format_scheduler_error_notification_falls_back_to_id_when_name_missing() {
+        let mut job = test_job("");
+        job.id = "no-name-job".into();
+        job.name = None;
+        let msg = format_scheduler_error_notification(&job, "record_run", "boom");
+        assert!(
+            msg.contains("no-name-job"),
+            "id should appear when name is None: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_scheduler_error_notification_truncates_long_error() {
+        let mut job = test_job("");
+        job.id = "x".into();
+        let long = "B".repeat(2000);
+        let msg = format_scheduler_error_notification(&job, "record_run", &long);
+        assert!(
+            msg.len() < 1600,
+            "message should be capped, got {} bytes",
+            msg.len()
+        );
+        assert!(msg.contains('…'), "should mark truncation: {msg}");
     }
 
     #[tokio::test]
