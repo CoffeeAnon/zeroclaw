@@ -87,6 +87,16 @@ data:
       # long-running requests (request_timeout is still 300s).
       provider_connect_timeout_secs = 25
 
+      [scheduler]
+      # Operator notification channel for cron failures AND scheduler-internal
+      # errors (record_run / record_last_run / reschedule_after_run failures).
+      # Without this, scheduler-internal failures are warn-logged only; a job
+      # whose reschedule_after_run fails (e.g. invalid cron expression) stays
+      # due-now and re-fires on every poll cycle silently. Added 2026-05-03
+      # after Fix 2.
+      failure_notify_channel = "signal"
+      failure_notify_to = "9de6f614-9b94-4264-ba2d-7e07a05979fe"
+
       [agent]
       max_tool_iterations = 999
       loop_detection_no_progress_threshold = 3
