@@ -57,10 +57,15 @@ data:
     ## Step 2 — Categorize
 
     Group flagged skills by primary_flag in this order:
-    1. **failing** — high priority, will Signal Dan in Step 5
-    2. **slow** — wiki only, no Signal regardless of severity
-    3. **silent** — wiki only; suggest schedule reduction
-    4. **stale** — wiki only; suggest archival or reactivation
+    1. **runaway** — structural failure (cron firing far above its schedule);
+       treat as urgent — Vikunja task + Signal in Step 5. Canonical case is
+       a stuck cron whose `reschedule_after_run` has been failing.
+    2. **failing** — high priority, will Signal Dan in Step 5
+    3. **slow** — wiki only, no Signal regardless of severity
+    4. **silent** — wiki only; suggest schedule reduction OR investigate why
+       runs aren't producing artifacts (silent now also fires when Sam runs
+       to completion but never writes wiki/memory, not just NO_REPLY).
+    5. **stale** — wiki only; suggest archival or reactivation
 
     Skills with the `patched_recently` flag are reported in a separate "watch"
     section without action.
@@ -131,7 +136,14 @@ data:
     ```markdown
     ### YYYY-MM-DD
 
-    Tracked: N skills. Flagged: X failing, Y slow, Z silent, W stale.
+    Tracked: N skills. Flagged: V runaway, X failing, Y slow, Z silent, W stale.
+
+    **Runaway** (if any — else omit this subsection):
+    - **<skill-name>** — fired <fires> times in 7d (~<per-day>/day) — vastly
+      over schedule `<expr>`. Probable cause: <one sentence, falsifiable —
+      typical cause is `reschedule_after_run` failure on an invalid expression>.
+      Proposed fix: <one sentence; reference the file/row Dan would edit>.
+      Vikunja: #<task-id>.
 
     **Failing** (if any — else omit this subsection):
     - **<skill-name>** — <fires>/<failures> in 7d (<rate>%) vs prior <prior-rate>%, Δ +<pp>pp.
@@ -144,7 +156,9 @@ data:
     - **<skill-name>** — avg <ms>ms vs prior <ms>ms (Δ +<pct>%). Schedule: `<expr>`.
 
     **Silent** (if any):
-    - **<skill-name>** — NO_REPLY <rate>% over 14d. Suggest schedule reduction.
+    - **<skill-name>** — NO_REPLY <rate>% / no-artifact <rate>% over 14d
+      (avg <ms>ms duration). Suggest schedule reduction OR investigate why
+      runs don't write wiki/memory.
 
     **Stale** (if any):
     - **<skill-name>** — last meaningful <iso> (>30d). Suggest archival.
@@ -155,34 +169,36 @@ data:
     **Healthy:** <comma-separated skill names>
     ```
 
-    ## Step 4 — File Vikunja tasks (failing only)
+    ## Step 4 — File Vikunja tasks (runaway + failing only)
 
-    For each `failing` skill, create one Vikunja task in Sam's inbox
-    (project #3, default):
+    For each `runaway` or `failing` skill, create one Vikunja task in Sam's
+    inbox (project #3, default). Use priority 4 for runaway (structural
+    bricker — likely re-firing every poll), priority 3 for failing:
 
     ```
-    shell: vikunja my-task create "skill-curator: <skill-name> regressed" \
+    shell: vikunja my-task create "skill-curator: <skill-name> <flag>" \
       --description "See concepts/skill-curator-digests.md (### <today>) for full numbers and proposed fix." \
-      --priority 3
+      --priority <3 or 4>
     ```
 
-    One task per failing skill. Don't batch. Capture the returned `#<id>` and
-    splice it into the corresponding bullet under your wiki section.
+    One task per skill. Don't batch. Capture the returned `#<id>` and splice
+    it into the corresponding bullet under your wiki section.
 
     Do NOT file Vikunja tasks for slow / silent / stale.
 
-    ## Step 5 — Signal Dan (failing only)
+    ## Step 5 — Signal Dan (runaway + failing only)
 
     Send a single send_user_message:
 
     ```
-    Skill curator weekly digest: <N> skills flagged (X failing).
+    Skill curator weekly digest: <N> skills flagged (V runaway, X failing).
     Wiki: concepts/skill-curator-digests.md (### <today>).
     Tasks filed: <count>.
     ```
 
-    Skip the Signal message entirely if no skills are `failing`. Slow / silent /
-    stale findings sit in the wiki for Dan to read on his own cadence.
+    Skip the Signal message entirely if no skills are `runaway` or `failing`.
+    Slow / silent / stale findings sit in the wiki for Dan to read on his
+    own cadence.
 
     ## Honoring pin / mark-patched
 

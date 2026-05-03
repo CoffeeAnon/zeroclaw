@@ -10,7 +10,10 @@ data:
 
     Reads ZeroClaw's cron SQLite database (`cron_jobs` + `cron_runs`) and emits
     per-skill stats over a recent window vs the prior window, classifying each
-    skill into healthy / failing / silent / stale / slow / patched_recently.
+    skill into healthy / runaway / failing / silent / stale / slow /
+    patched_recently. Silent now also fires on a high "no artifact written"
+    rate (Sam ran to completion but produced no wiki or memory write), not
+    just on the legacy NO_REPLY-sentinel rate.
     The classification is the deterministic Phase 1 of a Hermes-style curator
     loop: an agent skill (skill-curator) consumes this JSON in Phase 2 and
     decides what to do with the findings.
@@ -44,6 +47,7 @@ data:
     """
 
     import argparse
+    import bisect
     import datetime as dt
     import json
     import os
@@ -51,7 +55,7 @@ data:
     import sys
     from typing import Any, Dict, List, Optional, Tuple
 
-    VERSION = 1
+    VERSION = 2
 
     DEFAULT_DB_PATH = "/data/.zeroclaw/workspace/cron/jobs.db"
     DEFAULT_STATE_PATH = "/data/.zeroclaw/workspace/skill_curator_state.json"
@@ -60,11 +64,27 @@ data:
     FAILURE_RATE_DELTA_PP = 10.0
     DURATION_DELTA_PCT = 50.0
     SILENT_NO_REPLY_RATE = 0.95
+    SILENT_NO_ARTIFACT_RATE = 0.80
+    SILENT_MIN_AVG_DURATION_MS = 60_000  # ignore quick crons; only flag silent if it's actually working hard
     SILENT_WINDOW_DAYS = 14
     SILENT_MIN_FIRES = 5
     STALE_AFTER_DAYS = 30
     PATCHED_GRACE_DAYS = 7
     SLOW_MIN_FIRES = 3
+
+    # Runaway = a cron firing far more often than any sane schedule. The
+    # 2026-05-03 skill-curator cascade is the canonical case: invalid cron
+    # expression → reschedule_after_run failed → next_run never advanced →
+    # job re-fired every poll cycle (~10s, ≈ 8640/day). 100/day is a
+    # 14-min cadence — outside the realistic schedule range for any Sam
+    # cron, even hourly ones.
+    RUNAWAY_FIRES_PER_DAY = 100
+    ARTIFACT_GRACE_S = 30
+    WIKI_ROOT = "/data/workspace/wiki/"
+    MEMORY_DB_FILES = (
+        "/data/.zeroclaw/workspace/memory/brain.db",
+        "/data/.zeroclaw/workspace/memory/brain.db-wal",
+    )
 
     EVIDENCE_FAILURES = 3
     EVIDENCE_OUTPUT_CHARS = 240
@@ -153,7 +173,53 @@ data:
         return output.strip().upper() == "NO_REPLY"
 
 
-    def window_stats(runs: List[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+    def collect_artifact_mtimes() -> List[float]:
+        """Single pre-walk that builds a sorted list of artifact-write mtimes.
+        Sam's wiki tree (~73 files / 1.5 MB) plus the memory DB + WAL.
+        We don't care which file changed — only whether *any* artifact write
+        landed inside a given run window. Sorted for bisect lookup."""
+        mtimes: List[float] = []
+        try:
+            for d, _, files in os.walk(WIKI_ROOT):
+                for f in files:
+                    p = os.path.join(d, f)
+                    try:
+                        mtimes.append(os.path.getmtime(p))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        for p in MEMORY_DB_FILES:
+            try:
+                mtimes.append(os.path.getmtime(p))
+            except OSError:
+                pass
+        mtimes.sort()
+        return mtimes
+
+
+    def run_wrote_artifact(run: sqlite3.Row, mtimes: List[float]) -> Optional[bool]:
+        """Did this run produce at least one artifact write inside its window?
+        Returns None if we can't determine (timestamps unparseable)."""
+        started = parse_iso(run["started_at"])
+        finished = parse_iso(run["finished_at"]) if "finished_at" in run.keys() else None
+        if started is None:
+            return None
+        start_ts = started.timestamp()
+        if finished is not None:
+            end_ts = finished.timestamp() + ARTIFACT_GRACE_S
+        elif run["duration_ms"] is not None:
+            end_ts = start_ts + (run["duration_ms"] / 1000.0) + ARTIFACT_GRACE_S
+        else:
+            return None
+        lo = bisect.bisect_left(mtimes, start_ts)
+        hi = bisect.bisect_right(mtimes, end_ts)
+        return hi > lo
+
+
+    def window_stats(
+        runs: List[sqlite3.Row], artifact_mtimes: Optional[List[float]] = None
+    ) -> Optional[Dict[str, Any]]:
         if not runs:
             return None
         fires = len(runs)
@@ -162,7 +228,7 @@ data:
         no_replies = sum(1 for r in runs if is_no_reply(r["output"]))
         durations = [r["duration_ms"] for r in runs if r["duration_ms"] is not None]
         avg_duration_ms = (sum(durations) / len(durations)) if durations else None
-        return {
+        out: Dict[str, Any] = {
             "fires": fires,
             "successes": successes,
             "failures": failures,
@@ -171,6 +237,21 @@ data:
             "no_reply_rate": round(no_replies / fires, 4),
             "avg_duration_ms": round(avg_duration_ms) if avg_duration_ms is not None else None,
         }
+        if artifact_mtimes is not None:
+            wrote = 0
+            checkable = 0
+            for r in runs:
+                w = run_wrote_artifact(r, artifact_mtimes)
+                if w is None:
+                    continue
+                checkable += 1
+                if w:
+                    wrote += 1
+            no_artifact = checkable - wrote
+            out["wrote_artifact"] = wrote
+            out["no_artifact"] = no_artifact
+            out["no_artifact_rate"] = round(no_artifact / checkable, 4) if checkable else None
+        return out
 
 
     def deltas(current: Optional[Dict[str, Any]], prior: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -207,6 +288,7 @@ data:
         last_meaningful_iso: Optional[str],
         last_patched_iso: Optional[str],
         pinned: bool,
+        window_days: int,
         now: dt.datetime,
     ) -> Tuple[List[str], Optional[str]]:
         flags: List[str] = []
@@ -215,6 +297,15 @@ data:
         last_patched = parse_iso(last_patched_iso)
         if last_patched and (now - last_patched) <= dt.timedelta(days=PATCHED_GRACE_DAYS):
             patched_recent = True
+
+        # runaway — fires/day cap, never suppressed (always operationally urgent)
+        runaway = False
+        if current and current["fires"] > 0 and window_days > 0:
+            fires_per_day = current["fires"] / window_days
+            if fires_per_day > RUNAWAY_FIRES_PER_DAY:
+                runaway = True
+        if runaway:
+            flags.append("runaway")
 
         # failing — never suppressed
         failing = False
@@ -245,10 +336,26 @@ data:
             and not pinned
             and silent_window
             and silent_window["fires"] >= SILENT_MIN_FIRES
-            and silent_window["no_reply_rate"] > SILENT_NO_REPLY_RATE
         ):
-            flags.append("silent")
-            silent = True
+            # Two failure modes both classify as silent:
+            # (a) NO_REPLY sentinel rate high — Sam early-exits a lot.
+            # (b) no-artifact rate high AND avg duration is non-trivial —
+            #     Sam runs to completion but never persists any side effect
+            #     (the 2026-05-03 skill-curator Run 2 mode: final assistant
+            #     turn was a thought, no tool call, agent loop exited).
+            #     SILENT_MIN_AVG_DURATION_MS prevents flagging short crons
+            #     that legitimately don't write artifacts.
+            no_reply_silent = silent_window["no_reply_rate"] > SILENT_NO_REPLY_RATE
+            avg_ms = silent_window.get("avg_duration_ms") or 0
+            no_artifact_rate = silent_window.get("no_artifact_rate")
+            no_artifact_silent = (
+                no_artifact_rate is not None
+                and no_artifact_rate > SILENT_NO_ARTIFACT_RATE
+                and avg_ms >= SILENT_MIN_AVG_DURATION_MS
+            )
+            if no_reply_silent or no_artifact_silent:
+                flags.append("silent")
+                silent = True
 
         # stale — suppressed when silent is set; silent is the more specific
         # case with a clearer remediation (reduce schedule, not archive).
@@ -267,7 +374,9 @@ data:
                 return [], "healthy"
             return flags, "healthy"
 
-        rank = ["failing", "slow", "silent", "stale"]
+        # runaway ranks first — it's a structural failure that the operator
+        # needs to see before any per-skill classification.
+        rank = ["runaway", "failing", "slow", "silent", "stale"]
         primary = next((f for f in rank if f in flags), "healthy")
         return flags, primary
 
@@ -302,8 +411,22 @@ data:
             print(json.dumps({"version": VERSION, "generated_at": iso(now), "skills": []}, indent=2))
             return 2
 
+        # One filesystem walk for every artifact-write mtime in the cluster.
+        # Cheap (~73 wiki files + 2 memory DB files for Sam) and lets us
+        # classify silent-by-no-artifact with bisect rather than a per-run
+        # walk.
+        artifact_mtimes = collect_artifact_mtimes()
+
         skills_out: List[Dict[str, Any]] = []
-        summary = {"healthy": 0, "failing": 0, "silent": 0, "stale": 0, "slow": 0, "patched_recently": 0}
+        summary = {
+            "healthy": 0,
+            "runaway": 0,
+            "failing": 0,
+            "silent": 0,
+            "stale": 0,
+            "slow": 0,
+            "patched_recently": 0,
+        }
 
         for job in jobs:
             all_runs = fetch_runs(conn, job["id"], prior_since)
@@ -317,7 +440,9 @@ data:
 
             cur_stats = window_stats(cur_runs)
             prior_stats = window_stats(prior_runs)
-            silent_stats = window_stats(silent_runs)
+            # silent classification needs artifact-write data; current/prior
+            # don't (they're for failure-rate / duration deltas).
+            silent_stats = window_stats(silent_runs, artifact_mtimes=artifact_mtimes)
             d = deltas(cur_stats, prior_stats)
             lma = last_meaningful_at(silent_runs or all_runs)
             last_fire = all_runs[0]["started_at"] if all_runs else job["last_run"]
@@ -333,6 +458,7 @@ data:
                 last_meaningful_iso=lma,
                 last_patched_iso=last_patched,
                 pinned=pinned,
+                window_days=args.window_days,
                 now=now,
             )
 
@@ -360,7 +486,7 @@ data:
             }
             skills_out.append(record)
 
-        rank = {"failing": 0, "slow": 1, "silent": 2, "stale": 3, "patched_recently": 4, "healthy": 5}
+        rank = {"runaway": 0, "failing": 1, "slow": 2, "silent": 3, "stale": 4, "patched_recently": 5, "healthy": 6}
         skills_out.sort(key=lambda s: (rank.get(s["primary_flag"], 9), s["name"]))
 
         if args.flagged_only:
@@ -376,9 +502,12 @@ data:
                 "failure_rate_delta_pp": FAILURE_RATE_DELTA_PP,
                 "duration_delta_pct": DURATION_DELTA_PCT,
                 "silent_no_reply_rate": SILENT_NO_REPLY_RATE,
+                "silent_no_artifact_rate": SILENT_NO_ARTIFACT_RATE,
+                "silent_min_avg_duration_ms": SILENT_MIN_AVG_DURATION_MS,
                 "silent_window_days": SILENT_WINDOW_DAYS,
                 "stale_after_days": STALE_AFTER_DAYS,
                 "patched_grace_days": PATCHED_GRACE_DAYS,
+                "runaway_fires_per_day": RUNAWAY_FIRES_PER_DAY,
             },
             "summary": {**summary, "skills_tracked": len(jobs)},
             "skills": skills_out,
