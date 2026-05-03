@@ -27,14 +27,16 @@ last N hours for post-fire artifact health (Fix 1b — catches the case
 where status=ok but the intended side effect didn't happen):
 
   verified-success      — status=ok with at least one wiki-tree file
-                          modified during the run window, OR a short
-                          duration where no wiki write was expected
-  silent-success        — status=ok, ran >60s, but no wiki-tree changes
-                          detected during the run window. Suspicious —
-                          this is the failure mode where Sam reasons
-                          her way through Step N but never persists the
-                          intended write (e.g. final assistant message
-                          is a thought without a tool call).
+                          OR memory-DB file modified during the run
+                          window, OR a short duration where no artifact
+                          write was expected
+  silent-success        — status=ok, ran >60s, but no wiki-tree or
+                          memory-DB changes detected during the run
+                          window. Suspicious — this is the failure mode
+                          where Sam reasons her way through Step N but
+                          never persists the intended write (e.g. final
+                          assistant message is a thought without a tool
+                          call).
   failed-run            — status=error
 
 Exit codes:
@@ -68,6 +70,14 @@ VERBOSE_WINDOW_S = 120
 SILENT_SUCCESS_MIN_DURATION_S = 60      # below this, no-write is presumed legitimate
 WIKI_ROOT = "/data/workspace/wiki/"     # tree to check for post-fire modifications
 WIKI_PROBE_GRACE_S = 30                 # accept mtimes up to N seconds after finished_at
+# Sam's persistent memory store. SQLite WAL mode means writes hit `-wal`
+# first and `.db` only on checkpoint, so we track both. Some skills
+# (self-reflection-check) write to memory but not the wiki — without
+# this probe they false-positive as silent-success.
+MEMORY_DB_FILES = [
+    "/data/.zeroclaw/workspace/memory/brain.db",
+    "/data/.zeroclaw/workspace/memory/brain.db-wal",
+]
 
 # kubectl prefixes each log line with an RFC3339 timestamp, then a space, then
 # whatever the container wrote. Sam's own log lines often embed *another*
@@ -159,13 +169,16 @@ def fetch_recent_runs(lookback_hours: int) -> List[Dict[str, Any]]:
     return json.loads(stdout.strip()) if stdout.strip() else []
 
 
-def probe_wiki_changes(started_at: str, finished_at: str) -> List[str]:
-    """Enumerate files under WIKI_ROOT whose mtime falls within the run window
-    plus a small grace period after finished_at."""
+def probe_artifact_changes(started_at: str, finished_at: str) -> Dict[str, List[str]]:
+    """Enumerate files whose mtime falls within the run window plus
+    WIKI_PROBE_GRACE_S after finished_at. Returns {"wiki": [...], "memory": [...]}.
+
+    Combines a tree walk under WIKI_ROOT and a stat() pass over MEMORY_DB_FILES
+    into a single kubectl exec to avoid two round-trips."""
     started = parse_iso(started_at)
     finished = parse_iso(finished_at)
     if not started or not finished:
-        return []
+        return {"wiki": [], "memory": []}
     start_ts = started.timestamp()
     end_ts = finished.timestamp() + WIKI_PROBE_GRACE_S
     code = (
@@ -173,44 +186,61 @@ def probe_wiki_changes(started_at: str, finished_at: str) -> List[str]:
         f"start_ts = {start_ts}\n"
         f"end_ts = {end_ts}\n"
         f"root = {WIKI_ROOT!r}\n"
-        "out = []\n"
+        f"memory_files = {MEMORY_DB_FILES!r}\n"
+        "wiki = []\n"
         "for d, _, files in os.walk(root):\n"
         "    for f in files:\n"
         "        p = os.path.join(d, f)\n"
         "        try:\n"
         "            m = os.path.getmtime(p)\n"
         "            if start_ts <= m <= end_ts:\n"
-        "                out.append(p)\n"
+        "                wiki.append(p)\n"
         "        except OSError:\n"
         "            pass\n"
-        "print(json.dumps(out))\n"
+        "memory = []\n"
+        "for p in memory_files:\n"
+        "    try:\n"
+        "        m = os.path.getmtime(p)\n"
+        "        if start_ts <= m <= end_ts:\n"
+        "            memory.append(p)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "print(json.dumps({'wiki': wiki, 'memory': memory}))\n"
     )
     rc, stdout, _ = kubectl_exec_python(code)
     if rc != 0:
-        return []
+        return {"wiki": [], "memory": []}
     try:
-        return json.loads(stdout.strip()) if stdout.strip() else []
+        result = json.loads(stdout.strip()) if stdout.strip() else {}
+        return {
+            "wiki": result.get("wiki", []),
+            "memory": result.get("memory", []),
+        }
     except json.JSONDecodeError:
-        return []
+        return {"wiki": [], "memory": []}
 
 
-def diagnose_post_fire(run: Dict[str, Any], wiki_files: List[str]) -> Dict[str, Any]:
+def diagnose_post_fire(run: Dict[str, Any], artifacts: Dict[str, List[str]]) -> Dict[str, Any]:
     """Classify a completed cron_runs row using post-fire artifact evidence."""
     duration_s = (run.get("duration_ms") or 0) / 1000.0
+    wiki_files = artifacts.get("wiki", [])
+    memory_files = artifacts.get("memory", [])
     base = {
         "duration_seconds": duration_s,
         "wiki_modification_count": len(wiki_files),
+        "memory_modification_count": len(memory_files),
         "wiki_files_modified_during_run": wiki_files[:10],  # cap to avoid blob output
+        "memory_files_modified_during_run": memory_files,
     }
     if run.get("status") == "error":
         return {**base, "diagnosis": "failed-run"}
-    if wiki_files:
+    if wiki_files or memory_files:
         return {**base, "diagnosis": "verified-success"}
     if duration_s < SILENT_SUCCESS_MIN_DURATION_S:
         return {**base, "diagnosis": "verified-success",
-                "note": "short cron, no wiki write expected"}
+                "note": "short cron, no artifact write expected"}
     return {**base, "diagnosis": "silent-success",
-            "note": "ran >60s with status=ok but no wiki-tree changes during run window — suspicious"}
+            "note": "ran >60s with status=ok but no wiki-tree or memory-DB writes during run window — suspicious"}
 
 
 def parse_log_events(logs: str) -> List[Tuple[str, dt.datetime, str]]:
@@ -379,8 +409,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.job:
             runs = [r for r in runs if r["job_name"] == args.job]
         for run in runs:
-            wiki_files = probe_wiki_changes(run["started_at"], run["finished_at"])
-            d = diagnose_post_fire(run, wiki_files)
+            artifacts = probe_artifact_changes(run["started_at"], run["finished_at"])
+            d = diagnose_post_fire(run, artifacts)
             d.update({
                 "name": run["job_name"],
                 "job_id": run["job_id"],
@@ -421,12 +451,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             for r in post_fire:
                 dur = r.get("duration_seconds", 0)
                 print(f"[{r['diagnosis']:<22}] {r['name']:<30} duration={dur:>6.0f}s "
-                      f"wiki_changes={r['wiki_modification_count']}")
+                      f"wiki_changes={r['wiki_modification_count']} "
+                      f"memory_changes={r['memory_modification_count']}")
                 if r.get("note"):
                     print(f"    note: {r['note']}")
                 if r.get("wiki_files_modified_during_run"):
                     for p in r["wiki_files_modified_during_run"]:
-                        print(f"    + {p}")
+                        print(f"    + wiki: {p}")
+                if r.get("memory_files_modified_during_run"):
+                    for p in r["memory_files_modified_during_run"]:
+                        print(f"    + memory: {p}")
     else:
         print(json.dumps(payload, indent=2))
 
