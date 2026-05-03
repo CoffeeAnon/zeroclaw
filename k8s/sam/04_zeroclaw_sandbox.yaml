@@ -58,6 +58,7 @@ spec:
               mkdir -p /data/.zeroclaw/workspace/skills/wiki-management
               mkdir -p /data/.zeroclaw/workspace/skills/task-tracking
               mkdir -p /data/.zeroclaw/workspace/skills/team-coordination
+              mkdir -p /data/.zeroclaw/workspace/skills/skill-curator
           securityContext:
             runAsUser: 0
             runAsGroup: 0
@@ -217,6 +218,10 @@ spec:
               mountPath: /usr/local/bin/vikunja
               subPath: vikunja.py
               readOnly: true
+            - name: cron-telemetry-tool
+              mountPath: /usr/local/bin/cron-telemetry
+              subPath: cron-telemetry.py
+              readOnly: true
             # Identity files mounted directly from ConfigMap.
             - name: zeroclaw-identity
               mountPath: /data/.zeroclaw/workspace/AGENTS.md
@@ -286,6 +291,10 @@ spec:
             - name: skill-speakr-lookup
               mountPath: /data/.zeroclaw/workspace/skills/speakr-lookup/speakr-cli.py
               subPath: speakr-cli.py
+              readOnly: true
+            - name: skill-skill-curator
+              mountPath: /data/.zeroclaw/workspace/skills/skill-curator/SKILL.md
+              subPath: skill-curator.md
               readOnly: true
         - name: signal-api-adapter
           image: citizendaniel/signal-api-adapter:v1.3.0
@@ -374,6 +383,13 @@ spec:
           configMap:
             name: zeroclaw-vikunja-tool
             defaultMode: 0755
+        - name: cron-telemetry-tool
+          configMap:
+            name: zeroclaw-cron-telemetry-tool
+            defaultMode: 0755
+        - name: skill-skill-curator
+          configMap:
+            name: zeroclaw-skill-skill-curator
   volumeClaimTemplates:
     - metadata:
         name: zeroclaw-data
