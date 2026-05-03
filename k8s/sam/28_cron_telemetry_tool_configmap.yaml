@@ -1,0 +1,496 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zeroclaw-cron-telemetry-tool
+  namespace: ai-agents
+data:
+  cron-telemetry.py: |
+    #!/usr/bin/env python3
+    """cron-telemetry — deterministic cron-job rollup for Sam's skill curator.
+
+    Reads ZeroClaw's cron SQLite database (`cron_jobs` + `cron_runs`) and emits
+    per-skill stats over a recent window vs the prior window, classifying each
+    skill into healthy / failing / silent / stale / slow / patched_recently.
+    The classification is the deterministic Phase 1 of a Hermes-style curator
+    loop: an agent skill (skill-curator) consumes this JSON in Phase 2 and
+    decides what to do with the findings.
+
+    This script is read-only against the cron DB. State that the curator owns
+    (pinned skills, last-patched timestamps, last-rollup timestamp) lives in a
+    separate sidecar JSON file on the same PVC.
+
+    Subcommands:
+      cron-telemetry rollup [--window-days N] [--prior-window-days N]
+                            [--flagged-only] [--db PATH] [--state PATH]
+          Aggregate stats and emit JSON.
+
+      cron-telemetry status [--db PATH] [--state PATH]
+          Quick view of last rollup time, counts by state, pinned list.
+
+      cron-telemetry pin <job-id-or-name> [--state PATH]
+      cron-telemetry unpin <job-id-or-name> [--state PATH]
+          Toggle the pinned flag. Pinned skills are exempt from
+          silent/stale/slow flags; failing still fires.
+
+      cron-telemetry mark-patched <job-id-or-name> [--state PATH]
+          Record `last_patched_at = now`. Suppresses non-failing flags for
+          the configured grace window so a fix gets time to prove out.
+
+    Exit codes:
+      0  success (output is valid JSON or human-readable as appropriate)
+      2  nothing to report (DB empty, or no fires in window)
+      3  DB unavailable / cannot open
+      4  invalid arguments / unknown subcommand
+    """
+
+    import argparse
+    import datetime as dt
+    import json
+    import os
+    import sqlite3
+    import sys
+    from typing import Any, Dict, List, Optional, Tuple
+
+    VERSION = 1
+
+    DEFAULT_DB_PATH = "/data/.zeroclaw/workspace/cron/jobs.db"
+    DEFAULT_STATE_PATH = "/data/.zeroclaw/workspace/skill_curator_state.json"
+
+    FAILURE_RATE_FLAG = 0.20
+    FAILURE_RATE_DELTA_PP = 10.0
+    DURATION_DELTA_PCT = 50.0
+    SILENT_NO_REPLY_RATE = 0.95
+    SILENT_WINDOW_DAYS = 14
+    SILENT_MIN_FIRES = 5
+    STALE_AFTER_DAYS = 30
+    PATCHED_GRACE_DAYS = 7
+    SLOW_MIN_FIRES = 3
+
+    EVIDENCE_FAILURES = 3
+    EVIDENCE_OUTPUT_CHARS = 240
+
+
+    def utcnow() -> dt.datetime:
+        return dt.datetime.now(dt.timezone.utc)
+
+
+    def iso(t: dt.datetime) -> str:
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=dt.timezone.utc)
+        return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+    def parse_iso(s: Optional[str]) -> Optional[dt.datetime]:
+        if not s:
+            return None
+        s = s.strip().replace("Z", "+00:00")
+        try:
+            return dt.datetime.fromisoformat(s).astimezone(dt.timezone.utc)
+        except ValueError:
+            return None
+
+
+    def load_state(path: str) -> Dict[str, Any]:
+        if not os.path.exists(path):
+            return {"version": VERSION, "last_rollup_at": None, "pinned": [], "patched": {}}
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"warning: state file unreadable, treating as empty: {exc}", file=sys.stderr)
+            return {"version": VERSION, "last_rollup_at": None, "pinned": [], "patched": {}}
+        data.setdefault("version", VERSION)
+        data.setdefault("pinned", [])
+        data.setdefault("patched", {})
+        data.setdefault("last_rollup_at", None)
+        return data
+
+
+    def save_state(path: str, state: Dict[str, Any]) -> None:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+
+
+    def open_db(path: str) -> sqlite3.Connection:
+        if not os.path.exists(path):
+            print(f"error: cron db not found at {path}", file=sys.stderr)
+            sys.exit(3)
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        except sqlite3.OperationalError as exc:
+            print(f"error: cannot open cron db: {exc}", file=sys.stderr)
+            sys.exit(3)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+
+    def fetch_jobs(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+        return list(conn.execute(
+            "SELECT id, COALESCE(name, id) AS name, job_type, "
+            "       COALESCE(schedule, expression) AS schedule, enabled, "
+            "       created_at, last_run, last_status "
+            "FROM cron_jobs"
+        ))
+
+
+    def fetch_runs(conn: sqlite3.Connection, job_id: str, since: dt.datetime) -> List[sqlite3.Row]:
+        return list(conn.execute(
+            "SELECT started_at, finished_at, status, output, duration_ms "
+            "FROM cron_runs WHERE job_id = ? AND started_at >= ? "
+            "ORDER BY started_at DESC",
+            (job_id, iso(since)),
+        ))
+
+
+    def is_no_reply(output: Optional[str]) -> bool:
+        # Mirrors src/cron/scheduler.rs::is_no_reply_sentinel.
+        if not output:
+            return False
+        return output.strip().upper() == "NO_REPLY"
+
+
+    def window_stats(runs: List[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+        if not runs:
+            return None
+        fires = len(runs)
+        successes = sum(1 for r in runs if r["status"] == "ok")
+        failures = sum(1 for r in runs if r["status"] == "error")
+        no_replies = sum(1 for r in runs if is_no_reply(r["output"]))
+        durations = [r["duration_ms"] for r in runs if r["duration_ms"] is not None]
+        avg_duration_ms = (sum(durations) / len(durations)) if durations else None
+        return {
+            "fires": fires,
+            "successes": successes,
+            "failures": failures,
+            "no_replies": no_replies,
+            "failure_rate": round(failures / fires, 4),
+            "no_reply_rate": round(no_replies / fires, 4),
+            "avg_duration_ms": round(avg_duration_ms) if avg_duration_ms is not None else None,
+        }
+
+
+    def deltas(current: Optional[Dict[str, Any]], prior: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"failure_rate_pp": None, "duration_pct": None}
+        if current is None or prior is None:
+            return out
+        out["failure_rate_pp"] = round((current["failure_rate"] - prior["failure_rate"]) * 100, 2)
+        if (
+            current.get("avg_duration_ms")
+            and prior.get("avg_duration_ms")
+            and prior["avg_duration_ms"] > 0
+        ):
+            pct = (current["avg_duration_ms"] - prior["avg_duration_ms"]) / prior["avg_duration_ms"] * 100
+            out["duration_pct"] = round(pct, 2)
+        return out
+
+
+    def last_meaningful_at(runs: List[sqlite3.Row]) -> Optional[str]:
+        # "Meaningful" = the cron actually produced something; the stale flag
+        # cares about whether the skill has done real work recently, not
+        # whether it has been firing on schedule and bailing.
+        for r in runs:
+            if not is_no_reply(r["output"]):
+                return r["started_at"]
+        return None
+
+
+    def classify(
+        job: sqlite3.Row,
+        current: Optional[Dict[str, Any]],
+        prior: Optional[Dict[str, Any]],
+        silent_window: Optional[Dict[str, Any]],
+        deltas_dict: Dict[str, Any],
+        last_meaningful_iso: Optional[str],
+        last_patched_iso: Optional[str],
+        pinned: bool,
+        now: dt.datetime,
+    ) -> Tuple[List[str], Optional[str]]:
+        flags: List[str] = []
+
+        patched_recent = False
+        last_patched = parse_iso(last_patched_iso)
+        if last_patched and (now - last_patched) <= dt.timedelta(days=PATCHED_GRACE_DAYS):
+            patched_recent = True
+
+        # failing — never suppressed
+        failing = False
+        if current and current["fires"] > 0:
+            if current["failure_rate"] > FAILURE_RATE_FLAG:
+                failing = True
+            delta_pp = deltas_dict.get("failure_rate_pp")
+            if delta_pp is not None and delta_pp > FAILURE_RATE_DELTA_PP:
+                failing = True
+        if failing:
+            flags.append("failing")
+
+        if (
+            not patched_recent
+            and not pinned
+            and current
+            and prior
+            and current["fires"] >= SLOW_MIN_FIRES
+            and prior["fires"] >= SLOW_MIN_FIRES
+        ):
+            delta_pct = deltas_dict.get("duration_pct")
+            if delta_pct is not None and delta_pct > DURATION_DELTA_PCT:
+                flags.append("slow")
+
+        silent = False
+        if (
+            not patched_recent
+            and not pinned
+            and silent_window
+            and silent_window["fires"] >= SILENT_MIN_FIRES
+            and silent_window["no_reply_rate"] > SILENT_NO_REPLY_RATE
+        ):
+            flags.append("silent")
+            silent = True
+
+        # stale — suppressed when silent is set; silent is the more specific
+        # case with a clearer remediation (reduce schedule, not archive).
+        if not patched_recent and not pinned and not silent:
+            last_m = parse_iso(last_meaningful_iso)
+            if last_m is None or (now - last_m) > dt.timedelta(days=STALE_AFTER_DAYS):
+                created = parse_iso(job["created_at"])
+                if created is None or (now - created) > dt.timedelta(days=STALE_AFTER_DAYS):
+                    flags.append("stale")
+
+        if patched_recent:
+            flags.append("patched_recently")
+
+        if not flags or flags == ["patched_recently"]:
+            if not flags:
+                return [], "healthy"
+            return flags, "healthy"
+
+        rank = ["failing", "slow", "silent", "stale"]
+        primary = next((f for f in rank if f in flags), "healthy")
+        return flags, primary
+
+
+    def evidence(runs: List[sqlite3.Row]) -> Dict[str, Any]:
+        failures = [r for r in runs if r["status"] == "error"][:EVIDENCE_FAILURES]
+        return {
+            "recent_failures": [
+                {
+                    "started_at": r["started_at"],
+                    "duration_ms": r["duration_ms"],
+                    "output_excerpt": (r["output"] or "")[:EVIDENCE_OUTPUT_CHARS],
+                }
+                for r in failures
+            ],
+        }
+
+
+    def cmd_rollup(args: argparse.Namespace) -> int:
+        state = load_state(args.state)
+        pinned_set = set(state.get("pinned", []))
+        patched_map: Dict[str, str] = state.get("patched", {})
+
+        conn = open_db(args.db)
+        now = utcnow()
+        cur_since = now - dt.timedelta(days=args.window_days)
+        prior_since = now - dt.timedelta(days=args.window_days + args.prior_window_days)
+        silent_since = now - dt.timedelta(days=SILENT_WINDOW_DAYS)
+
+        jobs = fetch_jobs(conn)
+        if not jobs:
+            print(json.dumps({"version": VERSION, "generated_at": iso(now), "skills": []}, indent=2))
+            return 2
+
+        skills_out: List[Dict[str, Any]] = []
+        summary = {"healthy": 0, "failing": 0, "silent": 0, "stale": 0, "slow": 0, "patched_recently": 0}
+
+        for job in jobs:
+            all_runs = fetch_runs(conn, job["id"], prior_since)
+            cur_runs = [r for r in all_runs if parse_iso(r["started_at"]) and parse_iso(r["started_at"]) >= cur_since]
+            prior_runs = [
+                r for r in all_runs
+                if parse_iso(r["started_at"])
+                and prior_since <= parse_iso(r["started_at"]) < cur_since
+            ]
+            silent_runs = fetch_runs(conn, job["id"], silent_since)
+
+            cur_stats = window_stats(cur_runs)
+            prior_stats = window_stats(prior_runs)
+            silent_stats = window_stats(silent_runs)
+            d = deltas(cur_stats, prior_stats)
+            lma = last_meaningful_at(silent_runs or all_runs)
+            last_fire = all_runs[0]["started_at"] if all_runs else job["last_run"]
+            pinned = job["id"] in pinned_set or job["name"] in pinned_set
+            last_patched = patched_map.get(job["id"]) or patched_map.get(job["name"])
+
+            flags, primary = classify(
+                job=job,
+                current=cur_stats,
+                prior=prior_stats,
+                silent_window=silent_stats,
+                deltas_dict=d,
+                last_meaningful_iso=lma,
+                last_patched_iso=last_patched,
+                pinned=pinned,
+                now=now,
+            )
+
+            bucket = primary if primary in summary else "healthy"
+            summary[bucket] += 1
+            if "patched_recently" in flags:
+                summary["patched_recently"] += 1
+
+            record = {
+                "job_id": job["id"],
+                "name": job["name"],
+                "job_type": job["job_type"],
+                "schedule": job["schedule"],
+                "enabled": bool(job["enabled"]),
+                "pinned": pinned,
+                "last_patched_at": last_patched,
+                "current_window": cur_stats,
+                "prior_window": prior_stats,
+                "deltas": d,
+                "last_meaningful_at": lma,
+                "last_fire_at": last_fire,
+                "flags": flags,
+                "primary_flag": primary,
+                "evidence": evidence(all_runs) if "failing" in flags else {"recent_failures": []},
+            }
+            skills_out.append(record)
+
+        rank = {"failing": 0, "slow": 1, "silent": 2, "stale": 3, "patched_recently": 4, "healthy": 5}
+        skills_out.sort(key=lambda s: (rank.get(s["primary_flag"], 9), s["name"]))
+
+        if args.flagged_only:
+            skills_out = [s for s in skills_out if s["primary_flag"] != "healthy"]
+
+        payload = {
+            "version": VERSION,
+            "generated_at": iso(now),
+            "window_days": args.window_days,
+            "prior_window_days": args.prior_window_days,
+            "thresholds": {
+                "failure_rate_flag": FAILURE_RATE_FLAG,
+                "failure_rate_delta_pp": FAILURE_RATE_DELTA_PP,
+                "duration_delta_pct": DURATION_DELTA_PCT,
+                "silent_no_reply_rate": SILENT_NO_REPLY_RATE,
+                "silent_window_days": SILENT_WINDOW_DAYS,
+                "stale_after_days": STALE_AFTER_DAYS,
+                "patched_grace_days": PATCHED_GRACE_DAYS,
+            },
+            "summary": {**summary, "skills_tracked": len(jobs)},
+            "skills": skills_out,
+        }
+        print(json.dumps(payload, indent=2))
+
+        state["last_rollup_at"] = iso(now)
+        save_state(args.state, state)
+
+        if all(s["primary_flag"] == "healthy" for s in skills_out):
+            return 2
+        return 0
+
+
+    def cmd_status(args: argparse.Namespace) -> int:
+        state = load_state(args.state)
+        out = {
+            "last_rollup_at": state.get("last_rollup_at"),
+            "pinned": sorted(state.get("pinned", [])),
+            "patched": state.get("patched", {}),
+        }
+        print(json.dumps(out, indent=2))
+        return 0
+
+
+    def _resolve_target(conn: sqlite3.Connection, target: str) -> Optional[str]:
+        row = conn.execute(
+            "SELECT id, name FROM cron_jobs WHERE id = ? OR name = ? LIMIT 1",
+            (target, target),
+        ).fetchone()
+        return row["id"] if row else None
+
+
+    def cmd_pin(args: argparse.Namespace, *, pin: bool) -> int:
+        conn = open_db(args.db)
+        handle = _resolve_target(conn, args.target)
+        if handle is None:
+            print(f"warning: no cron matches '{args.target}', storing literal", file=sys.stderr)
+            handle = args.target
+        state = load_state(args.state)
+        pinned = set(state.get("pinned", []))
+        if pin:
+            pinned.add(handle)
+        else:
+            pinned.discard(handle)
+        state["pinned"] = sorted(pinned)
+        save_state(args.state, state)
+        print(json.dumps({"pinned": state["pinned"]}, indent=2))
+        return 0
+
+
+    def cmd_mark_patched(args: argparse.Namespace) -> int:
+        conn = open_db(args.db)
+        handle = _resolve_target(conn, args.target)
+        if handle is None:
+            print(f"warning: no cron matches '{args.target}', storing literal", file=sys.stderr)
+            handle = args.target
+        state = load_state(args.state)
+        state.setdefault("patched", {})[handle] = iso(utcnow())
+        save_state(args.state, state)
+        print(json.dumps({"patched": state["patched"]}, indent=2))
+        return 0
+
+
+    def build_parser() -> argparse.ArgumentParser:
+        p = argparse.ArgumentParser(prog="cron-telemetry", description=__doc__.split("\n\n")[0])
+        sub = p.add_subparsers(dest="cmd", required=True)
+
+        def add_common(sp: argparse.ArgumentParser) -> None:
+            sp.add_argument("--db", default=os.environ.get("CRON_DB_PATH", DEFAULT_DB_PATH))
+            sp.add_argument("--state", default=os.environ.get("CRON_TELEMETRY_STATE", DEFAULT_STATE_PATH))
+
+        sp = sub.add_parser("rollup", help="aggregate per-skill stats and classify")
+        sp.add_argument("--window-days", type=int, default=7)
+        sp.add_argument("--prior-window-days", type=int, default=7)
+        sp.add_argument("--flagged-only", action="store_true")
+        add_common(sp)
+
+        sp = sub.add_parser("status", help="show last-rollup time, pinned list, patched map")
+        add_common(sp)
+
+        sp = sub.add_parser("pin", help="exempt a skill from silent/stale/slow flags")
+        sp.add_argument("target", help="job id or job name")
+        add_common(sp)
+
+        sp = sub.add_parser("unpin", help="reverse pin")
+        sp.add_argument("target")
+        add_common(sp)
+
+        sp = sub.add_parser("mark-patched", help="record last_patched_at = now")
+        sp.add_argument("target")
+        add_common(sp)
+
+        return p
+
+
+    def main(argv: Optional[List[str]] = None) -> int:
+        parser = build_parser()
+        args = parser.parse_args(argv)
+        if args.cmd == "rollup":
+            return cmd_rollup(args)
+        if args.cmd == "status":
+            return cmd_status(args)
+        if args.cmd == "pin":
+            return cmd_pin(args, pin=True)
+        if args.cmd == "unpin":
+            return cmd_pin(args, pin=False)
+        if args.cmd == "mark-patched":
+            return cmd_mark_patched(args)
+        parser.error(f"unknown subcommand: {args.cmd}")
+        return 4
+
+
+    if __name__ == "__main__":
+        sys.exit(main())

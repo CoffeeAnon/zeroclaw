@@ -1,0 +1,165 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zeroclaw-skill-skill-curator
+  namespace: ai-agents
+data:
+  skill-curator.md: |
+    ---
+    name: skill-curator
+    description: >
+      Weekly review of cron-skill health. Use when the `skill-curator`
+      cron fires, or when Dan asks "how are my crons doing", "any skills
+      regressing", or "should I retire any crons". Consumes the
+      deterministic Phase 1 rollup from `cron-telemetry rollup`,
+      writes a digest to the wiki, files Vikunja tasks for failing
+      skills, and Signal-pings Dan only when something is failing.
+    always: false
+    ---
+
+    # Skill Curator
+
+    A two-phase loop modeled on Hermes's curator. Phase 1 is the deterministic
+    Python script `cron-telemetry`, which classifies every cron skill into
+    healthy / failing / silent / stale / slow / patched_recently. Phase 2 — this
+    skill — turns the JSON into a wiki digest and Vikunja tasks.
+
+    You are explicitly NOT authorized to edit cron prompts, ConfigMaps, or any
+    skill text. You only propose. Dan applies changes via the wiki + Vikunja
+    workflow.
+
+    Do not call cron_run — you are already inside the cron job.
+
+    ## Step 0 — Activity Backoff
+
+    Run the standard activity-backoff query (memory_recall for the most recent
+    Signal message or assistant reply). If a real conversation happened in the
+    last 30 minutes, end immediately with `NO_REPLY`. Skill curator is never
+    urgent; Dan's attention takes priority.
+
+    ## Step 1 — Run the rollup
+
+    ```
+    cron-telemetry rollup --window-days 7 --prior-window-days 7
+    ```
+
+    Capture stdout. Exit codes:
+    - `0` → there are flagged skills, proceed to Step 2
+    - `2` → nothing to report (all healthy or DB empty). End with `NO_REPLY`.
+    - `3` → DB unavailable. Send Signal to Dan: "skill-curator: cron DB unreadable
+      at /data/.zeroclaw/workspace/cron/jobs.db". Then end.
+
+    Parse the JSON from stdout. Inspect `summary` and `skills[].primary_flag`.
+
+    ## Step 2 — Categorize and prioritize
+
+    Group flagged skills by primary_flag in this order:
+    1. **failing** — high priority, always Signal-pings Dan
+    2. **slow** — wiki only unless duration_pct delta > 100%
+    3. **silent** — wiki only; suggest schedule reduction
+    4. **stale** — wiki only; suggest archival or reactivation
+
+    Skills with the `patched_recently` flag are reported in a separate "watch"
+    section without action.
+
+    ## Step 3 — Write the wiki digest
+
+    Path: `wiki/zeroclaw/skill-curator/YYYY-MM-DD.md`. Use today's Vancouver
+    date. Structure:
+
+    ```
+    ---
+    title: Skill Curator Digest YYYY-MM-DD
+    type: digest
+    generated_at: <ISO timestamp from JSON>
+    ---
+
+    # Skill Curator Digest YYYY-MM-DD
+
+    Tracked: N skills. Flagged: X failing, Y slow, Z silent, W stale.
+
+    ## Failing
+
+    ### <skill-name>
+    - schedule: <cron expression>
+    - 7d: F failures / N fires (rate%)  vs prior 7d: F/N (rate%)
+    - delta: +X.Xpp failure rate
+    - last meaningful: <ISO>
+    - recent failure samples (top 3, 240 chars each):
+      - <started_at>: <output_excerpt>
+    - **Probable cause:** <one-paragraph interpretation based on the
+      output excerpts. Be specific and falsifiable, not "could be many things".>
+    - **Proposed fix:** <one-paragraph proposal. Reference the exact prompt
+      line, ConfigMap, or skill file Dan would edit. Do not edit it yourself.>
+    - **Vikunja task:** #<id> (filed in Step 4)
+
+    ## Slow / Silent / Stale (same per-skill structure, lighter on prose)
+
+    ## Watch — Patched Recently
+
+    Skills inside the 7-day grace window after a `mark-patched` call.
+    Listed for transparency; no action needed unless they remain flagged
+    after the grace expires.
+
+    ## Healthy
+
+    One-line summary: "<count> skills passed all checks: <comma-list of names>"
+    ```
+
+    Use the `wiki-management` skill to write the file.
+
+    ## Step 4 — File Vikunja tasks (failing only)
+
+    For each `failing` skill, create one Vikunja task in Sam's inbox
+    (project #3, default) using the vikunja CLI:
+
+    ```
+    vikunja my-task create "skill-curator: <skill-name> regressed" \
+      --description "<wiki link>\n\n<one-line summary of the regression>" \
+      --priority 3
+    ```
+
+    One task per failing skill. Don't batch — keeps each remediation discrete
+    and trackable. Include the wiki link in the description.
+
+    Do not file Vikunja tasks for slow / silent / stale — those are wiki-only
+    until they escalate to failing or until the digest sits unread for two
+    weeks (which is itself a signal Dan can act on).
+
+    ## Step 5 — Signal Dan (failing only)
+
+    Send a single Signal message via send_user_message:
+
+    ```
+    Skill curator weekly digest: <N> skills flagged (X failing).
+    Wiki: <wiki-link to today's digest>
+    Tasks filed: <count>
+    ```
+
+    Skip the Signal message entirely if no skills are `failing`. Slow / silent /
+    stale findings live in the wiki for Dan to read on his own cadence.
+
+    ## Honoring pin / mark-patched
+
+    Both signals are honored automatically by Phase 1 — `cron-telemetry rollup`
+    suppresses non-failing flags for pinned skills and skills inside the
+    7-day patched-grace window. You do not need to filter them in Phase 2;
+    they will not appear with non-failing primary flags.
+
+    If Dan tells you "ignore <skill>" or "don't worry about <skill>": call
+    `cron-telemetry pin <skill-name>` from a shell tool. If Dan tells you
+    "I just fixed <skill>": call `cron-telemetry mark-patched <skill-name>`.
+    Both updates are written to the sidecar state file and persist across
+    pod restarts (they live on the PVC).
+
+    ## What you do NOT do
+
+    - Edit cron prompts (no `cron_update` calls).
+    - Edit skill ConfigMaps (no `kubectl` calls of any kind — Walter's job, and
+      even Walter is read-only here).
+    - Delete or archive cron jobs.
+    - File more than one Vikunja task per skill per week (check existing
+      open tasks in the "skill-curator" prefix before creating).
+    - Send more than one Signal message per run.
+    - Call cron_run.
+    - Spend more than one LLM turn on a healthy skill.
